@@ -180,9 +180,9 @@
 		tasks: string[];
 	};
 
-	const chartWidth = 900;
-	const chartHeight = 320;
-	const chartPad = { top: 18, right: 20, bottom: 34, left: 54 };
+	const chartWidth = 1080;
+	const chartHeight = 360;
+	const chartPad = { top: 26, right: 88, bottom: 48, left: 18 };
 	const defaultDashboardSettings: DashboardSettings = {
 		taxesEnabled: true,
 		shortTermTaxRate: 40.8,
@@ -197,6 +197,7 @@
 	let loading = $state(true);
 	let error = $state<string | undefined>();
 	let menuOpen = $state(false);
+	let showAnnualizedReturns = $state(false);
 	let activeLoadId = 0;
 	let progressPoll: ReturnType<typeof setInterval> | undefined;
 	let dashboardAbort: AbortController | undefined;
@@ -393,11 +394,12 @@
 	function chartPath(points: ChartPoint[], key: 'actualReturnPct' | 'marketReturnPct') {
 		if (points.length === 0) return '';
 
-		const domain = chartDomain(points);
+		const yDomain = chartDomain(points);
+		const xDomain = chartDateDomain(points);
 		return points
 			.map((point, index) => {
 				const command = index === 0 ? 'M' : 'L';
-				return `${command} ${xFor(index, points.length)} ${yFor(point[key], domain)}`;
+				return `${command} ${xForDate(point.date, xDomain)} ${yFor(point[key], yDomain)}`;
 			})
 			.join(' ');
 	}
@@ -407,23 +409,101 @@
 		const min = Math.min(...values);
 		const max = Math.max(...values);
 		const spread = Math.max(max - min, 0.1);
-		return { min: min - spread * 0.12, max: max + spread * 0.12 };
+		const step = niceStep(spread / 4);
+		const tickMin = Math.floor(min / step) * step;
+		let tickMax = Math.ceil(max / step) * step;
+		if (tickMax <= tickMin) tickMax = tickMin + step;
+		const ticks: number[] = [];
+
+		for (let tick = tickMin; tick <= tickMax + step / 2; tick += step) {
+			ticks.push(roundTick(tick));
+		}
+
+		return {
+			min: roundTick(tickMin),
+			max: roundTick(tickMax),
+			ticks,
+		};
 	}
 
 	function yTicks(points: ChartPoint[]) {
-		const domain = chartDomain(points);
-		return [domain.max, (domain.max + domain.min) / 2, domain.min];
+		return [...chartDomain(points).ticks].reverse();
 	}
 
-	function xFor(index: number, count: number) {
+	function xTicks(points: ChartPoint[]) {
+		const domain = chartDateDomain(points);
+		if (!Number.isFinite(domain.min) || !Number.isFinite(domain.max)) return [];
+
+		const start = new Date(domain.min);
+		const end = new Date(domain.max);
+		const ticks: string[] = [];
+
+		for (let year = start.getUTCFullYear(); year <= end.getUTCFullYear(); year++) {
+			for (const month of [0, 6]) {
+				const tick = Date.UTC(year, month, 1);
+				if (tick > domain.min && tick < domain.max) ticks.push(toIsoDate(tick));
+			}
+		}
+
+		return ticks;
+	}
+
+	function chartDateDomain(points: ChartPoint[]) {
+		const dates = points.map(point => dateTime(point.date)).filter(Number.isFinite);
+		const min = Math.min(...dates);
+		const max = Math.max(...dates);
+		return { min, max };
+	}
+
+	function xForDate(date: string, domain: { min: number; max: number }) {
 		const width = chartWidth - chartPad.left - chartPad.right;
-		if (count <= 1) return chartPad.left + width / 2;
-		return chartPad.left + (index / (count - 1)) * width;
+		if (domain.max <= domain.min) return chartPad.left + width / 2;
+		return chartPad.left + ((dateTime(date) - domain.min) / (domain.max - domain.min)) * width;
 	}
 
-	function yFor(value: number, domain: { min: number; max: number }) {
+	function yFor(value: number, domain: { min: number; max: number; ticks: number[] }) {
 		const height = chartHeight - chartPad.top - chartPad.bottom;
 		return chartPad.top + (1 - (value - domain.min) / (domain.max - domain.min)) * height;
+	}
+
+	function niceStep(value: number) {
+		if (!Number.isFinite(value) || value <= 0) return 0.1;
+
+		const exponent = Math.floor(Math.log10(value));
+		const base = Math.pow(10, exponent);
+		const normalized = value / base;
+		if (normalized <= 1) return base;
+		if (normalized <= 2) return base * 2;
+		if (normalized <= 5) return base * 5;
+		return base * 10;
+	}
+
+	function roundTick(value: number) {
+		return Math.round(value * 10_000) / 10_000;
+	}
+
+	function chartRange(points: ChartPoint[]) {
+		if (points.length === 0) return;
+		return { start: points[0].date, end: points[points.length - 1].date };
+	}
+
+	function annualizedReturn(returnPct: number | undefined, range: { start: string; end: string } | undefined) {
+		if (returnPct === undefined || !range) return;
+		const years = (dateTime(range.end) - dateTime(range.start)) / 31_557_600_000;
+		if (years <= 0 || returnPct <= -1) return;
+		return Math.pow(1 + returnPct, 1 / years) - 1;
+	}
+
+	function displayedReturn(returnPct: number | undefined, range: { start: string; end: string } | undefined) {
+		return showAnnualizedReturns ? annualizedReturn(returnPct, range) : returnPct;
+	}
+
+	function dateTime(value: string) {
+		return Date.parse(`${value}T00:00:00.000Z`);
+	}
+
+	function toIsoDate(value: number) {
+		return new Date(value).toISOString().slice(0, 10);
 	}
 
 	function metricClass(returnPct?: number) {
@@ -514,6 +594,12 @@
 		if (!value) return '—';
 		return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(
 			new Date(`${value}T00:00:00`),
+		);
+	}
+
+	function formatMonthYear(value: string) {
+		return new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' }).format(
+			new Date(`${value}T00:00:00.000Z`),
 		);
 	}
 
@@ -693,36 +779,115 @@
 			</article>
 		</section>
 
-		<section class="chart-panel">
-			<div class="panel-heading">
-				<div>
-					<h2>Performance vs S&P 500</h2>
-					<p>{dashboard.summary.tradeCount} stock sell trades, {dashboard.marketSymbol} benchmark</p>
-				</div>
-				<div class="legend">
-					<span><i class="actual"></i>Trades</span>
-					<span><i class="market"></i>S&P 500</span>
-				</div>
-			</div>
+		<section class="chart-panel return-card">
+			<h2>Rate of return</h2>
+			<p class="return-summary">
+				Your closed stock trades had a cumulative rate of return of
+				<strong>{formatPercent(dashboard.summary.actualReturnPct)}</strong>
+				{#if chartRange(dashboard.chart)}
+					from {formatDate(chartRange(dashboard.chart)?.start)} to {formatDate(chartRange(dashboard.chart)?.end)}.
+					<span>
+						(Annualized: {formatPercent(
+							annualizedReturn(dashboard.summary.actualReturnPct, chartRange(dashboard.chart)),
+						)})
+					</span>
+				{:else}
+					for the selected symbols.
+				{/if}
+			</p>
+			<p class="return-method">
+				Realized FIFO stock sells only; open positions, cash flows, interest, dividends, and options are not part of
+				this line.
+			</p>
 
 			{#if dashboard.chart.length > 1}
-				<svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="Trade performance chart">
+				{@const yDomain = chartDomain(dashboard.chart)}
+				{@const xDomain = chartDateDomain(dashboard.chart)}
+				<svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="Rate of return chart">
 					{#each yTicks(dashboard.chart) as tick}
 						<line
 							x1={chartPad.left}
 							x2={chartWidth - chartPad.right}
-							y1={yFor(tick, chartDomain(dashboard.chart))}
-							y2={yFor(tick, chartDomain(dashboard.chart))}
+							y1={yFor(tick, yDomain)}
+							y2={yFor(tick, yDomain)}
 							class="grid-line"
 						/>
-						<text x="8" y={yFor(tick, chartDomain(dashboard.chart)) + 4}>{formatPercent(tick)}</text>
+						<text class="y-label" x={chartWidth - chartPad.right + 24} y={yFor(tick, yDomain) + 5}>
+							{formatPercent(tick)}
+						</text>
 					{/each}
+					<line
+						x1={chartPad.left}
+						x2={chartWidth - chartPad.right}
+						y1={yFor(0, yDomain)}
+						y2={yFor(0, yDomain)}
+						class="zero-line"
+					/>
+					{#each xTicks(dashboard.chart) as tick}
+						<line
+							x1={xForDate(tick, xDomain)}
+							x2={xForDate(tick, xDomain)}
+							y1={chartHeight - chartPad.bottom}
+							y2={chartHeight - chartPad.bottom + 8}
+							class="x-tick"
+						/>
+						<text class="x-label" x={xForDate(tick, xDomain)} y={chartHeight - 8}>
+							{formatMonthYear(tick)}
+						</text>
+					{/each}
+					<line
+						x1={chartPad.left}
+						x2={chartWidth - chartPad.right}
+						y1={chartHeight - chartPad.bottom}
+						y2={chartHeight - chartPad.bottom}
+						class="chart-axis"
+					/>
+					<line
+						x1={chartWidth - chartPad.right}
+						x2={chartWidth - chartPad.right}
+						y1={chartPad.top}
+						y2={chartHeight - chartPad.bottom}
+						class="chart-axis"
+					/>
 					<path d={chartPath(dashboard.chart, 'marketReturnPct')} class="market-line" />
 					<path d={chartPath(dashboard.chart, 'actualReturnPct')} class="actual-line" />
 				</svg>
 			{:else}
 				<div class="empty-chart">Need cached Alpha Vantage prices for the selected trades.</div>
 			{/if}
+
+			<div class="index-group">
+				<p>Common indexes</p>
+				<div class="index-pills">
+					<span>DJIA</span>
+					<span>NASDAQ</span>
+					<span class="active"><i></i>S&amp;P 500</span>
+					<span>Russell 2000</span>
+				</div>
+			</div>
+
+			<div class="return-table">
+				<div class="return-table-head">
+					<span>Portfolio/Index</span>
+					<span>Rate of Return</span>
+				</div>
+				<div class="return-table-row">
+					<span><i class="actual"></i>Closed stock trades</span>
+					<strong
+						>{formatPercent(displayedReturn(dashboard.summary.actualReturnPct, chartRange(dashboard.chart)))}</strong
+					>
+				</div>
+				<div class="return-table-row">
+					<span><i class="market"></i>S&amp;P 500</span>
+					<strong
+						>{formatPercent(displayedReturn(dashboard.summary.marketReturnPct, chartRange(dashboard.chart)))}</strong
+					>
+				</div>
+				<label class="annualized-toggle">
+					<span>Show annualized returns</span>
+					<input type="checkbox" bind:checked={showAnnualizedReturns} />
+				</label>
+			</div>
 		</section>
 
 		{#if unavailableCache.length > 0}
@@ -1151,6 +1316,209 @@
 		margin-top: 14px;
 	}
 
+	.return-card {
+		border-color: #cdd6df;
+		background: #ffffff;
+		color: #000000;
+		padding: 54px 52px 46px;
+	}
+
+	.return-card h2 {
+		margin: 0;
+		font-size: clamp(2rem, 4vw, 3rem);
+		font-weight: 400;
+		letter-spacing: 0;
+		line-height: 1.1;
+	}
+
+	.return-summary {
+		max-width: 1180px;
+		margin-top: 46px;
+		color: #0a0a0a;
+		font-size: clamp(1.25rem, 2.3vw, 2.1rem);
+		line-height: 1.45;
+	}
+
+	.return-summary strong,
+	.return-table-row strong {
+		color: #21752d;
+		font-weight: 400;
+	}
+
+	.return-method {
+		margin-top: 18px;
+		color: #006b9f;
+		font-size: clamp(1rem, 1.7vw, 1.45rem);
+		line-height: 1.35;
+	}
+
+	.return-card svg {
+		display: block;
+		width: 100%;
+		height: 420px;
+		margin-top: 34px;
+		overflow: visible;
+	}
+
+	.return-card svg text {
+		fill: #000000;
+		font-size: 20px;
+	}
+
+	.grid-line {
+		stroke: #d6dee8;
+		stroke-width: 1;
+	}
+
+	.zero-line {
+		stroke: #7b8288;
+		stroke-dasharray: 4 4;
+		stroke-width: 2;
+	}
+
+	.chart-axis,
+	.x-tick {
+		stroke: #c9d5e6;
+		stroke-width: 1.5;
+	}
+
+	.x-label {
+		text-anchor: middle;
+	}
+
+	.y-label {
+		text-anchor: start;
+	}
+
+	.actual-line,
+	.market-line {
+		fill: none;
+		stroke-width: 3.5;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.actual-line {
+		stroke: #0096d6;
+	}
+
+	.market-line {
+		stroke: #3e4a54;
+	}
+
+	.index-group {
+		margin-top: 42px;
+	}
+
+	.index-group p {
+		margin-bottom: 24px;
+		color: #56626f;
+		font-size: 1.3rem;
+	}
+
+	.index-pills {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 16px;
+	}
+
+	.index-pills span {
+		display: inline-flex;
+		align-items: center;
+		gap: 18px;
+		border: 1px solid transparent;
+		border-radius: 999px;
+		background: #e9eef2;
+		padding: 12px 22px;
+		color: #000000;
+		font-size: 1.35rem;
+		line-height: 1;
+	}
+
+	.index-pills .active {
+		border-color: #3f4a54;
+		background: #f8fafc;
+	}
+
+	.index-pills i {
+		width: 34px;
+		height: 34px;
+		border-radius: 50%;
+		background: #3e4a54;
+	}
+
+	.return-table {
+		margin-top: 42px;
+	}
+
+	.return-table-head,
+	.return-table-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(150px, 220px);
+		align-items: center;
+		column-gap: 20px;
+	}
+
+	.return-table-head {
+		background: #f4f6f8;
+		border-bottom: 1px solid #d8e0e8;
+		color: #586574;
+		font-size: 1.16rem;
+	}
+
+	.return-table-head span,
+	.return-table-row span,
+	.return-table-row strong {
+		padding: 18px 16px;
+	}
+
+	.return-table-head span:last-child,
+	.return-table-row strong {
+		text-align: right;
+	}
+
+	.return-table-row {
+		border-bottom: 1px dotted #d8e0e8;
+		font-size: 1.12rem;
+	}
+
+	.return-table-row span {
+		display: inline-flex;
+		align-items: center;
+		gap: 22px;
+		color: #000000;
+	}
+
+	.return-table-row i {
+		width: 24px;
+		height: 24px;
+		border-radius: 50%;
+	}
+
+	.return-table-row .actual {
+		background: #0096d6;
+	}
+
+	.return-table-row .market {
+		background: #3e4a54;
+	}
+
+	.annualized-toggle {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 14px;
+		margin-top: 26px;
+		color: #000000;
+		font-size: 1.2rem;
+	}
+
+	.annualized-toggle input {
+		width: 20px;
+		height: 20px;
+		margin: 0;
+	}
+
 	.panel-heading {
 		display: flex;
 		align-items: center;
@@ -1160,71 +1528,11 @@
 		border-bottom: 1px solid var(--app-border);
 	}
 
-	.legend {
-		display: flex;
-		gap: 16px;
-		color: var(--app-muted);
-		font-size: 0.86rem;
-		font-weight: 700;
-	}
-
-	.legend span {
-		display: inline-flex;
-		align-items: center;
-		gap: 7px;
-	}
-
-	.legend i {
-		width: 18px;
-		height: 3px;
-		border-radius: 999px;
-	}
-
-	.legend .actual {
-		background: var(--app-chart-a);
-	}
-
-	.legend .market {
-		background: var(--app-chart-b);
-	}
-
-	svg {
-		display: block;
-		width: 100%;
-		height: 340px;
-	}
-
-	svg text {
-		fill: var(--app-muted);
-		font-size: 0.76rem;
-	}
-
-	.grid-line {
-		stroke: var(--app-border);
-		stroke-width: 1;
-	}
-
-	.actual-line,
-	.market-line {
-		fill: none;
-		stroke-width: 3;
-		stroke-linecap: round;
-		stroke-linejoin: round;
-	}
-
-	.actual-line {
-		stroke: var(--app-chart-a);
-	}
-
-	.market-line {
-		stroke: var(--app-chart-b);
-	}
-
 	.empty-chart {
 		display: grid;
 		min-height: 280px;
 		place-items: center;
-		color: var(--app-muted);
+		color: #56626f;
 	}
 
 	.cache-strip {
