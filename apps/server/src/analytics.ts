@@ -284,7 +284,8 @@ export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 	const stockTrades = enrichTrades(selectedStockTrades, history, taxes);
 	const optionTrades = enrichTrades(selectedOptionTrades, history, taxes);
 	const trades = [...stockTrades, ...optionTrades];
-	const selectedTransactions = filterCsvTransactions(transactions, selectedSymbols, symbols);
+	const visibleTransactions = transactions.filter(isVisibleTransaction);
+	const selectedTransactions = filterCsvTransactions(visibleTransactions, selectedSymbols, symbols);
 
 	return {
 		ok: true,
@@ -415,7 +416,7 @@ function csvAssetType(row: SchwabRow, isOption: boolean): CsvTransactionRow['ass
 	const description = row.Description.trim();
 	if (/transfer/i.test(action) || /^Tfr /i.test(description)) return 'transfer';
 	if (!symbol) return 'cash';
-	if (/interest|dividend/i.test(action)) return 'cash';
+	if (/interest|dividend|\bdiv\b/i.test(action)) return 'cash';
 	if (/MONEY INVESTOR|TREASURY MONEY|VALUE ADVANTAGE/i.test(description)) return 'cash';
 	if (/CD FDIC|T BILL|TREASURY BILL/i.test(description)) return 'other';
 	if (/^[A-Z][A-Z.]{0,8}$/.test(symbol.toUpperCase())) return 'stock';
@@ -941,6 +942,10 @@ function getSelectedSymbols(url: URL, symbols: string[]) {
 function filterCsvTransactions(rows: CsvTransactionRow[], selectedSymbols: string[], symbols: string[]) {
 	if (selectedSymbols.length === symbols.length) return rows;
 	return rows.filter(row => row.filterSymbol && selectedSymbols.includes(row.filterSymbol));
+}
+
+function isVisibleTransaction(row: CsvTransactionRow) {
+	return row.assetType !== 'cash' && row.assetType !== 'transfer';
 }
 
 function attachAnalysis(rows: CsvTransactionRow[], trades: TradeRow[]) {

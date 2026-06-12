@@ -736,8 +736,8 @@
 		<section class="table-panel">
 			<div class="panel-heading">
 				<div>
-					<h2>CSV transactions</h2>
-					<p>{dashboard.transactions.length} rows from the CSV; outcome columns populate for matched closes</p>
+					<h2>Transactions</h2>
+					<p>{dashboard.transactions.length} security transaction rows; outcomes populate for matched closes</p>
 				</div>
 			</div>
 
@@ -764,11 +764,7 @@
 					<tbody>
 						{#each dashboard.transactions as transaction}
 							{@const analysis = transaction.analysis}
-							<tr
-								class:cash-row={transaction.assetType === 'cash'}
-								class:option-row={transaction.assetType === 'option'}
-								class:transfer-row={transaction.assetType === 'transfer'}
-							>
+							<tr class:option-row={transaction.assetType === 'option'}>
 								<td>
 									{formatDate(transaction.date)}
 									<span>{transactionDateDetail(transaction)}</span>
@@ -1285,11 +1281,6 @@
 
 	.option-row {
 		background: color-mix(in srgb, var(--app-panel-strong) 42%, transparent);
-	}
-
-	.cash-row,
-	.transfer-row {
-		background: color-mix(in srgb, var(--app-bg) 34%, transparent);
 	}
 
 	.trade-symbol-line {
