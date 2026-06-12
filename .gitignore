@@ -6,6 +6,7 @@ dist
 build
 .svelte-kit
 *.tgz
+data
 
 # dotenv environment variable files
 .env.development.local

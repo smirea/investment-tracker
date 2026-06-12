@@ -2,8 +2,8 @@
 
 - Runtime: Bun API server
 - Language: TypeScript, Svelte
-- UI: SvelteKit SPA
-- Styling: Tailwind CSS v4
+- UI: SvelteKit SPA (use https://svelte.page where necessary)
+- Styling: svelte (tailwind v4 only for minor inline styles)
 - Linting: Oxlint + oxfmt
 - Git Hooks: Lefthook
 
