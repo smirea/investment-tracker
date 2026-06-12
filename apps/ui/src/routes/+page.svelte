@@ -1317,9 +1317,9 @@
 	}
 
 	.return-card {
-		border-color: #cdd6df;
-		background: #ffffff;
-		color: #000000;
+		border-color: var(--app-border);
+		background: var(--app-panel);
+		color: var(--app-text);
 		padding: 54px 52px 46px;
 	}
 
@@ -1334,20 +1334,20 @@
 	.return-summary {
 		max-width: 1180px;
 		margin-top: 46px;
-		color: #0a0a0a;
+		color: var(--app-text);
 		font-size: clamp(1.25rem, 2.3vw, 2.1rem);
 		line-height: 1.45;
 	}
 
 	.return-summary strong,
 	.return-table-row strong {
-		color: #21752d;
+		color: var(--app-success);
 		font-weight: 400;
 	}
 
 	.return-method {
 		margin-top: 18px;
-		color: #006b9f;
+		color: var(--app-muted);
 		font-size: clamp(1rem, 1.7vw, 1.45rem);
 		line-height: 1.35;
 	}
@@ -1361,24 +1361,24 @@
 	}
 
 	.return-card svg text {
-		fill: #000000;
+		fill: var(--app-text);
 		font-size: 20px;
 	}
 
 	.grid-line {
-		stroke: #d6dee8;
+		stroke: var(--app-border);
 		stroke-width: 1;
 	}
 
 	.zero-line {
-		stroke: #7b8288;
+		stroke: var(--app-muted);
 		stroke-dasharray: 4 4;
 		stroke-width: 2;
 	}
 
 	.chart-axis,
 	.x-tick {
-		stroke: #c9d5e6;
+		stroke: var(--app-border);
 		stroke-width: 1.5;
 	}
 
@@ -1399,11 +1399,11 @@
 	}
 
 	.actual-line {
-		stroke: #0096d6;
+		stroke: var(--app-chart-a);
 	}
 
 	.market-line {
-		stroke: #3e4a54;
+		stroke: var(--app-chart-b);
 	}
 
 	.index-group {
@@ -1412,7 +1412,7 @@
 
 	.index-group p {
 		margin-bottom: 24px;
-		color: #56626f;
+		color: var(--app-muted);
 		font-size: 1.3rem;
 	}
 
@@ -1428,23 +1428,23 @@
 		gap: 18px;
 		border: 1px solid transparent;
 		border-radius: 999px;
-		background: #e9eef2;
+		background: var(--app-panel-strong);
 		padding: 12px 22px;
-		color: #000000;
+		color: var(--app-text);
 		font-size: 1.35rem;
 		line-height: 1;
 	}
 
 	.index-pills .active {
-		border-color: #3f4a54;
-		background: #f8fafc;
+		border-color: var(--app-chart-b);
+		background: color-mix(in srgb, var(--app-chart-b) 16%, var(--app-panel));
 	}
 
 	.index-pills i {
 		width: 34px;
 		height: 34px;
 		border-radius: 50%;
-		background: #3e4a54;
+		background: var(--app-chart-b);
 	}
 
 	.return-table {
@@ -1460,9 +1460,9 @@
 	}
 
 	.return-table-head {
-		background: #f4f6f8;
-		border-bottom: 1px solid #d8e0e8;
-		color: #586574;
+		background: var(--app-panel-strong);
+		border-bottom: 1px solid var(--app-border);
+		color: var(--app-muted);
 		font-size: 1.16rem;
 	}
 
@@ -1478,7 +1478,7 @@
 	}
 
 	.return-table-row {
-		border-bottom: 1px dotted #d8e0e8;
+		border-bottom: 1px dotted var(--app-border);
 		font-size: 1.12rem;
 	}
 
@@ -1486,7 +1486,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 22px;
-		color: #000000;
+		color: var(--app-text);
 	}
 
 	.return-table-row i {
@@ -1496,11 +1496,11 @@
 	}
 
 	.return-table-row .actual {
-		background: #0096d6;
+		background: var(--app-chart-a);
 	}
 
 	.return-table-row .market {
-		background: #3e4a54;
+		background: var(--app-chart-b);
 	}
 
 	.annualized-toggle {
@@ -1509,7 +1509,7 @@
 		justify-content: flex-end;
 		gap: 14px;
 		margin-top: 26px;
-		color: #000000;
+		color: var(--app-text);
 		font-size: 1.2rem;
 	}
 
@@ -1532,7 +1532,7 @@
 		display: grid;
 		min-height: 280px;
 		place-items: center;
-		color: #56626f;
+		color: var(--app-muted);
 	}
 
 	.cache-strip {
