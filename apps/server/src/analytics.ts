@@ -53,6 +53,28 @@ type StockTransaction = {
 	amount: number;
 };
 
+type OptionAction = 'Buy to Open' | 'Sell to Close' | 'Sell to Open' | 'Buy to Close' | 'Expired';
+type OptionSide = 'long' | 'short';
+type OptionKind = 'call' | 'put';
+
+type OptionTransaction = {
+	id: string;
+	file: string;
+	line: number;
+	date: string;
+	action: OptionAction;
+	symbol: string;
+	underlyingSymbol: string;
+	description: string;
+	quantity: number;
+	price: number;
+	fees: number;
+	amount: number;
+	optionKind: OptionKind;
+	expirationDate: string;
+	strike: number;
+};
+
 type Lot = {
 	buyId: string;
 	date: string;
@@ -60,17 +82,30 @@ type Lot = {
 	costPerShare: number;
 };
 
+type OptionLot = {
+	openId: string;
+	side: OptionSide;
+	date: string;
+	remainingQuantity: number;
+	amountPerContract: number;
+};
+
 type Match = {
 	buyId: string;
 	buyDate: string;
 	quantity: number;
 	costBasis: number;
+	proceeds?: number;
+	returnBasis?: number;
 };
 
 type MatchedTrade = {
 	id: string;
+	assetType: 'stock' | 'option';
 	date: string;
+	action: string;
 	symbol: string;
+	underlyingSymbol?: string;
 	description: string;
 	quantity: number;
 	matchedQuantity: number;
@@ -84,6 +119,10 @@ type MatchedTrade = {
 	earliestBuyDate?: string;
 	latestBuyDate?: string;
 	holdingDays?: number;
+	optionSide?: OptionSide;
+	optionKind?: OptionKind;
+	expirationDate?: string;
+	strike?: number;
 	matches: Match[];
 };
 
@@ -125,6 +164,35 @@ export type DashboardSummary = {
 	laterAverageDeltaPnl?: number;
 };
 
+export type OptionSummary = {
+	tradeCount: number;
+	analyzedTradeCount: number;
+	winners: number;
+	losers: number;
+	flat: number;
+	longTrades: number;
+	shortTrades: number;
+	callTrades: number;
+	putTrades: number;
+	totalCostBasis: number;
+	grossPnl: number;
+	taxAmount: number;
+	netPnl: number;
+	returnPct?: number;
+	winRate?: number;
+	positive?: boolean;
+};
+
+export type TotalSummary = {
+	analyzedTradeCount: number;
+	totalCostBasis: number;
+	grossPnl: number;
+	taxAmount: number;
+	netPnl: number;
+	returnPct?: number;
+	positive?: boolean;
+};
+
 export type ChartPoint = {
 	date: string;
 	actualReturnPct: number;
@@ -141,6 +209,8 @@ export type DashboardResponse = {
 	taxes: TaxSettings;
 	cache: CacheStatus[];
 	summary: DashboardSummary;
+	optionSummary: OptionSummary;
+	totalSummary: TotalSummary;
 	chart: ChartPoint[];
 	trades: TradeRow[];
 	horizons: typeof horizons;
@@ -174,15 +244,23 @@ export type TaxSettings = {
 
 export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 	const taxes = getTaxSettings(url);
-	const { files, transactions } = readStockTransactions();
-	const matchedTrades = matchTrades(transactions);
-	const symbols = [...new Set(matchedTrades.map(trade => trade.symbol))].sort();
+	const { files, stockTransactions, optionTransactions } = readTransactions();
+	const matchedStockTrades = matchTrades(stockTransactions);
+	const matchedOptionTrades = matchOptions(optionTransactions);
+	const stockSymbols = [...new Set(matchedStockTrades.map(trade => trade.symbol))].sort();
+	const optionSymbols = [...new Set(matchedOptionTrades.map(trade => trade.underlyingSymbol).filter(isDefinedString))];
+	const symbols = [...new Set([...stockSymbols, ...optionSymbols])].sort();
 	const selectedSymbols = getSelectedSymbols(url, symbols);
-	const selectedTrades = matchedTrades.filter(trade => selectedSymbols.includes(trade.symbol));
-	const requiredSymbols = requiredSymbolsFor(selectedSymbols);
+	const selectedStockTrades = matchedStockTrades.filter(trade => selectedSymbols.includes(trade.symbol));
+	const selectedOptionTrades = matchedOptionTrades.filter(
+		trade => trade.underlyingSymbol && selectedSymbols.includes(trade.underlyingSymbol),
+	);
+	const requiredSymbols = requiredSymbolsFor(selectedSymbols, stockSymbols);
 	const cache = await ensurePriceHistory(requiredSymbols);
 	const history = getPriceHistory(requiredSymbols);
-	const trades = enrichTrades(selectedTrades, history, taxes);
+	const stockTrades = enrichTrades(selectedStockTrades, history, taxes);
+	const optionTrades = enrichTrades(selectedOptionTrades, history, taxes);
+	const trades = [...stockTrades, ...optionTrades];
 
 	return {
 		ok: true,
@@ -193,19 +271,24 @@ export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 		marketSymbol,
 		taxes,
 		cache,
-		summary: summarize(trades),
-		chart: buildChart(trades),
+		summary: summarize(stockTrades),
+		optionSummary: summarizeOptions(optionTrades),
+		totalSummary: summarizeTotal(stockTrades, optionTrades),
+		chart: buildChart(stockTrades),
 		trades: trades.sort((a, b) => b.date.localeCompare(a.date) || a.symbol.localeCompare(b.symbol)),
 		horizons,
 	};
 }
 
 export function buildDashboardStatus(url: URL): DashboardStatusResponse {
-	const { files, transactions } = readStockTransactions();
-	const matchedTrades = matchTrades(transactions);
-	const symbols = [...new Set(matchedTrades.map(trade => trade.symbol))].sort();
+	const { files, stockTransactions, optionTransactions } = readTransactions();
+	const matchedStockTrades = matchTrades(stockTransactions);
+	const matchedOptionTrades = matchOptions(optionTransactions);
+	const stockSymbols = [...new Set(matchedStockTrades.map(trade => trade.symbol))].sort();
+	const optionSymbols = [...new Set(matchedOptionTrades.map(trade => trade.underlyingSymbol).filter(isDefinedString))];
+	const symbols = [...new Set([...stockSymbols, ...optionSymbols])].sort();
 	const selectedSymbols = getSelectedSymbols(url, symbols);
-	const requiredSymbols = requiredSymbolsFor(selectedSymbols);
+	const requiredSymbols = requiredSymbolsFor(selectedSymbols, stockSymbols);
 	const priceData = getPriceHistoryReadiness(requiredSymbols);
 	const activeFetch = getPriceHistoryRun(requiredSymbols);
 	const missingSymbols = priceData.filter(item => item.state === 'missing').map(item => item.symbol);
@@ -241,11 +324,12 @@ export function buildDashboardStatus(url: URL): DashboardStatusResponse {
 	};
 }
 
-function readStockTransactions() {
+function readTransactions() {
 	const files = readdirSync(dataDir)
 		.filter(file => file.toLowerCase().endsWith('.csv'))
 		.sort();
-	const transactions: StockTransaction[] = [];
+	const stockTransactions: StockTransaction[] = [];
+	const optionTransactions: OptionTransaction[] = [];
 
 	for (const file of files) {
 		const rows = parse(readFileSync(new URL(file, dataDir), 'utf8'), {
@@ -256,12 +340,15 @@ function readStockTransactions() {
 		}) as SchwabRow[];
 
 		rows.forEach((row, index) => {
-			const transaction = toStockTransaction(row, file, index + 2);
-			if (transaction) transactions.push(transaction);
+			const stockTransaction = toStockTransaction(row, file, index + 2);
+			if (stockTransaction) stockTransactions.push(stockTransaction);
+
+			const optionTransaction = toOptionTransaction(row, file, index + 2);
+			if (optionTransaction) optionTransactions.push(optionTransaction);
 		});
 	}
 
-	return { files, transactions };
+	return { files, stockTransactions, optionTransactions };
 }
 
 function toStockTransaction(row: SchwabRow, file: string, line: number): StockTransaction | undefined {
@@ -292,6 +379,39 @@ function toStockTransaction(row: SchwabRow, file: string, line: number): StockTr
 		price,
 		fees: moneyFrom(row['Fees & Comm']),
 		amount,
+	};
+}
+
+function toOptionTransaction(row: SchwabRow, file: string, line: number): OptionTransaction | undefined {
+	const action = row.Action.trim() as OptionAction;
+	if (!isOptionAction(action)) return;
+
+	const parsed = parseOptionSymbol(row.Symbol.trim());
+	if (!parsed) return;
+
+	const date = action === 'Expired' ? parseEffectiveDate(row.Date) : parseDate(row.Date);
+	const quantity = Math.abs(numberFrom(row.Quantity));
+	const price = moneyFrom(row.Price);
+	const amount = moneyFrom(row.Amount);
+	if (!date || quantity <= 0) return;
+	if (action !== 'Expired' && (price < 0 || !Number.isFinite(amount))) return;
+
+	return {
+		id: `${file}:${line}`,
+		file,
+		line,
+		date,
+		action,
+		symbol: row.Symbol.trim().toUpperCase(),
+		underlyingSymbol: parsed.underlyingSymbol,
+		description: row.Description.trim(),
+		quantity,
+		price: Number.isFinite(price) ? price : 0,
+		fees: moneyFrom(row['Fees & Comm']),
+		amount: Number.isFinite(amount) ? amount : 0,
+		optionKind: parsed.optionKind,
+		expirationDate: parsed.expirationDate,
+		strike: parsed.strike,
 	};
 }
 
@@ -345,7 +465,9 @@ function matchTrades(transactions: StockTransaction[]) {
 
 		trades.push({
 			id: transaction.id,
+			assetType: 'stock',
 			date: transaction.date,
+			action: transaction.action,
 			symbol: transaction.symbol,
 			description: transaction.description,
 			quantity: transaction.quantity,
@@ -367,24 +489,131 @@ function matchTrades(transactions: StockTransaction[]) {
 	return trades;
 }
 
+function matchOptions(transactions: OptionTransaction[]) {
+	const lots = new Map<string, OptionLot[]>();
+	const trades: MatchedTrade[] = [];
+	const ordered = [...transactions].sort((a, b) => a.date.localeCompare(b.date) || b.line - a.line);
+
+	for (const transaction of ordered) {
+		if (transaction.action === 'Buy to Open' || transaction.action === 'Sell to Open') {
+			const side = transaction.action === 'Buy to Open' ? 'long' : 'short';
+			const openingAmount = Math.abs(transaction.amount);
+			(lots.get(transaction.symbol) ?? lots.set(transaction.symbol, []).get(transaction.symbol)!).push({
+				openId: transaction.id,
+				side,
+				date: transaction.date,
+				remainingQuantity: transaction.quantity,
+				amountPerContract: openingAmount / transaction.quantity,
+			});
+			continue;
+		}
+
+		const symbolLots = lots.get(transaction.symbol) ?? [];
+		const closeSide = optionCloseSide(transaction.action);
+		const matches: Match[] = [];
+		let remaining = transaction.quantity;
+		let returnBasis = 0;
+		let proceeds = 0;
+		let grossPnl = 0;
+		let optionSide: OptionSide | undefined;
+
+		while (remaining > 0.000001) {
+			const lotIndex = symbolLots.findIndex(lot => !closeSide || lot.side === closeSide);
+			if (lotIndex === -1) break;
+
+			const lot = symbolLots[lotIndex];
+			const quantity = Math.min(remaining, lot.remainingQuantity);
+			const closeFraction = quantity / transaction.quantity;
+			const openingAmount = quantity * lot.amountPerContract;
+			const closingAmount = transaction.action === 'Buy to Close' ? Math.abs(transaction.amount) * closeFraction : 0;
+			const closeProceeds = transaction.action === 'Sell to Close' ? transaction.amount * closeFraction : 0;
+			const match =
+				lot.side === 'long'
+					? {
+							buyId: lot.openId,
+							buyDate: lot.date,
+							quantity,
+							costBasis: openingAmount,
+							proceeds: closeProceeds,
+							returnBasis: openingAmount,
+						}
+					: {
+							buyId: lot.openId,
+							buyDate: lot.date,
+							quantity,
+							costBasis: closingAmount,
+							proceeds: openingAmount,
+							returnBasis: openingAmount,
+						};
+
+			matches.push(match);
+			returnBasis += match.returnBasis;
+			proceeds += match.proceeds;
+			grossPnl += match.proceeds - match.costBasis;
+			optionSide ??= lot.side;
+			remaining -= quantity;
+			lot.remainingQuantity -= quantity;
+			if (lot.remainingQuantity <= 0.000001) symbolLots.splice(lotIndex, 1);
+		}
+
+		const matchedQuantity = transaction.quantity - remaining;
+		const buyDates = matches.map(match => match.buyDate).sort();
+
+		trades.push({
+			id: transaction.id,
+			assetType: 'option',
+			date: transaction.date,
+			action: transaction.action,
+			symbol: transaction.symbol,
+			underlyingSymbol: transaction.underlyingSymbol,
+			description: transaction.description,
+			quantity: transaction.quantity,
+			matchedQuantity,
+			unmatchedQuantity: remaining,
+			soldPrice: transaction.price,
+			proceeds,
+			matchedProceeds: matchedQuantity > 0 ? proceeds : undefined,
+			costBasis: matchedQuantity > 0 ? returnBasis : undefined,
+			actualPnl: matchedQuantity > 0 ? grossPnl : undefined,
+			actualReturnPct: matchedQuantity > 0 && returnBasis > 0 ? grossPnl / returnBasis : undefined,
+			earliestBuyDate: buyDates[0],
+			latestBuyDate: buyDates.at(-1),
+			holdingDays: weightedHoldingDays(matches, transaction.date, returnBasis),
+			optionSide,
+			optionKind: transaction.optionKind,
+			expirationDate: transaction.expirationDate,
+			strike: transaction.strike,
+			matches,
+		});
+	}
+
+	return trades;
+}
+
 function enrichTrades(trades: MatchedTrade[], history: PriceHistory, taxes: TaxSettings) {
 	return trades.map(trade => {
 		const symbolHistory = history[trade.symbol] ?? [];
 		const marketHistory = history[marketSymbol] ?? [];
 		const actual = compareActual(trade, taxes);
-		const later = Object.fromEntries(
-			horizons.map(horizon => [
-				horizon.key,
-				compareHypothetical(trade, symbolHistory, horizon.months, 1, actual, taxes),
-			]),
-		);
-		const earlier = Object.fromEntries(
-			horizons.map(horizon => [
-				horizon.key,
-				compareHypothetical(trade, symbolHistory, horizon.months, -1, actual, taxes),
-			]),
-		);
-		const market = compareMarket(trade, marketHistory, taxes);
+		const later =
+			trade.assetType === 'stock'
+				? Object.fromEntries(
+						horizons.map(horizon => [
+							horizon.key,
+							compareHypothetical(trade, symbolHistory, horizon.months, 1, actual, taxes),
+						]),
+					)
+				: emptyComparisons();
+		const earlier =
+			trade.assetType === 'stock'
+				? Object.fromEntries(
+						horizons.map(horizon => [
+							horizon.key,
+							compareHypothetical(trade, symbolHistory, horizon.months, -1, actual, taxes),
+						]),
+					)
+				: emptyComparisons();
+		const market = trade.assetType === 'stock' ? compareMarket(trade, marketHistory, taxes) : undefined;
 
 		return {
 			...trade,
@@ -399,6 +628,10 @@ function enrichTrades(trades: MatchedTrade[], history: PriceHistory, taxes: TaxS
 			earlier,
 		};
 	});
+}
+
+function emptyComparisons() {
+	return Object.fromEntries(horizons.map(horizon => [horizon.key, null]));
 }
 
 function compareHypothetical(
@@ -442,6 +675,19 @@ function compareHypothetical(
 
 function compareActual(trade: MatchedTrade, taxes: TaxSettings) {
 	if (!trade.costBasis || trade.matchedProceeds === undefined || trade.matches.length === 0) return;
+
+	if (trade.matches.every(match => match.proceeds !== undefined)) {
+		return taxAdjustedMetric(
+			trade.matches.map(match => ({
+				buyDate: match.buyDate,
+				sellDate: trade.date,
+				costBasis: match.costBasis,
+				proceeds: match.proceeds ?? 0,
+				returnBasis: match.returnBasis,
+			})),
+			taxes,
+		);
+	}
 
 	const matchedProceeds = trade.matchedProceeds;
 	return taxAdjustedMetric(
@@ -509,6 +755,54 @@ function summarize(trades: TradeRow[]): DashboardSummary {
 	};
 }
 
+function summarizeOptions(trades: TradeRow[]): OptionSummary {
+	const optionTrades = trades.filter(trade => trade.assetType === 'option');
+	const analyzed = optionTrades.filter(trade => trade.costBasis && trade.actualPnl !== undefined);
+	const totalCostBasis = sum(analyzed.map(trade => trade.costBasis ?? 0));
+	const netPnl = sum(analyzed.map(trade => trade.actualPnl ?? 0));
+	const grossPnl = sum(analyzed.map(trade => trade.grossActualPnl ?? trade.actualPnl ?? 0));
+	const taxAmount = sum(analyzed.map(trade => trade.taxAmount ?? 0));
+	const winners = analyzed.filter(trade => (trade.actualPnl ?? 0) > 0).length;
+	const losers = analyzed.filter(trade => (trade.actualPnl ?? 0) < 0).length;
+
+	return {
+		tradeCount: optionTrades.length,
+		analyzedTradeCount: analyzed.length,
+		winners,
+		losers,
+		flat: analyzed.length - winners - losers,
+		longTrades: analyzed.filter(trade => trade.optionSide === 'long').length,
+		shortTrades: analyzed.filter(trade => trade.optionSide === 'short').length,
+		callTrades: analyzed.filter(trade => trade.optionKind === 'call').length,
+		putTrades: analyzed.filter(trade => trade.optionKind === 'put').length,
+		totalCostBasis,
+		grossPnl,
+		taxAmount,
+		netPnl,
+		returnPct: totalCostBasis > 0 ? netPnl / totalCostBasis : undefined,
+		winRate: analyzed.length > 0 ? winners / analyzed.length : undefined,
+		positive: analyzed.length > 0 ? netPnl >= 0 : undefined,
+	};
+}
+
+function summarizeTotal(stockTrades: TradeRow[], optionTrades: TradeRow[]): TotalSummary {
+	const analyzed = [...stockTrades, ...optionTrades].filter(trade => trade.costBasis && trade.actualPnl !== undefined);
+	const totalCostBasis = sum(analyzed.map(trade => trade.costBasis ?? 0));
+	const netPnl = sum(analyzed.map(trade => trade.actualPnl ?? 0));
+	const grossPnl = sum(analyzed.map(trade => trade.grossActualPnl ?? trade.actualPnl ?? 0));
+	const taxAmount = sum(analyzed.map(trade => trade.taxAmount ?? 0));
+
+	return {
+		analyzedTradeCount: analyzed.length,
+		totalCostBasis,
+		grossPnl,
+		taxAmount,
+		netPnl,
+		returnPct: totalCostBasis > 0 ? netPnl / totalCostBasis : undefined,
+		positive: analyzed.length > 0 ? netPnl >= 0 : undefined,
+	};
+}
+
 function buildChart(trades: TradeRow[]) {
 	const points: ChartPoint[] = [];
 	let basis = 0;
@@ -573,8 +867,9 @@ function getSelectedSymbols(url: URL, symbols: string[]) {
 	return symbols.filter(symbol => requested.has(symbol));
 }
 
-function requiredSymbolsFor(selectedSymbols: string[]) {
-	return selectedSymbols.length > 0 ? [...selectedSymbols, marketSymbol] : [marketSymbol];
+function requiredSymbolsFor(selectedSymbols: string[], stockSymbols: string[]) {
+	const selectedStockSymbols = selectedSymbols.filter(symbol => stockSymbols.includes(symbol));
+	return selectedStockSymbols.length > 0 ? [...selectedStockSymbols, marketSymbol] : [marketSymbol];
 }
 
 function statusTasks({
@@ -626,11 +921,46 @@ function symbolList(symbols: string[]) {
 	return `${symbols.slice(0, 5).join(', ')} and ${symbols.length - 5} more`;
 }
 
+function isDefinedString(value: string | undefined): value is string {
+	return Boolean(value);
+}
+
+function isOptionAction(action: string): action is OptionAction {
+	return (
+		action === 'Buy to Open' ||
+		action === 'Sell to Close' ||
+		action === 'Sell to Open' ||
+		action === 'Buy to Close' ||
+		action === 'Expired'
+	);
+}
+
+function optionCloseSide(action: OptionAction) {
+	if (action === 'Sell to Close') return 'long';
+	if (action === 'Buy to Close') return 'short';
+}
+
+function parseOptionSymbol(value: string) {
+	const match = value
+		.trim()
+		.toUpperCase()
+		.match(/^([A-Z.]+)\s+(\d{2}\/\d{2}\/\d{4})\s+(\d+(?:\.\d+)?)\s+([CP])$/);
+	if (!match) return;
+
+	return {
+		underlyingSymbol: match[1],
+		expirationDate: parseDate(match[2])!,
+		strike: Number(match[3]),
+		optionKind: match[4] === 'C' ? ('call' as const) : ('put' as const),
+	};
+}
+
 type ProfitLine = {
 	buyDate: string;
 	sellDate: string;
 	costBasis: number;
 	proceeds: number;
+	returnBasis?: number;
 };
 
 type ProfitMetric = {
@@ -641,7 +971,7 @@ type ProfitMetric = {
 };
 
 function taxAdjustedMetric(lines: ProfitLine[], taxes: TaxSettings): ProfitMetric {
-	const costBasis = sum(lines.map(line => line.costBasis));
+	const costBasis = sum(lines.map(line => line.returnBasis ?? line.costBasis));
 	let pnl = 0;
 	let taxAmount = 0;
 	let shortTermGain = false;
@@ -717,6 +1047,13 @@ function daysBetween(start: string, end: string) {
 
 function parseDate(value: string) {
 	const match = value.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+	if (!match) return;
+	return `${match[3]}-${match[1]}-${match[2]}`;
+}
+
+function parseEffectiveDate(value: string) {
+	const matches = [...value.matchAll(/(\d{2})\/(\d{2})\/(\d{4})/g)];
+	const match = matches.at(-1);
 	if (!match) return;
 	return `${match[3]}-${match[1]}-${match[2]}`;
 }

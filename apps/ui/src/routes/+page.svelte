@@ -15,8 +15,11 @@
 	};
 	type TradeRow = {
 		id: string;
+		assetType: 'stock' | 'option';
 		date: string;
+		action: string;
 		symbol: string;
+		underlyingSymbol?: string;
 		description: string;
 		quantity: number;
 		matchedQuantity: number;
@@ -32,6 +35,10 @@
 		grossActualPnl?: number;
 		taxAmount?: number;
 		shortTermGain: boolean;
+		optionSide?: 'long' | 'short';
+		optionKind?: 'call' | 'put';
+		expirationDate?: string;
+		strike?: number;
 		marketPnl?: number;
 		marketReturnPct?: number;
 		later: Record<string, ComparisonMetric | null>;
@@ -52,6 +59,33 @@
 		timingDeltaReturnPct?: number;
 		earlierAverageDeltaPnl?: number;
 		laterAverageDeltaPnl?: number;
+	};
+	type OptionSummary = {
+		tradeCount: number;
+		analyzedTradeCount: number;
+		winners: number;
+		losers: number;
+		flat: number;
+		longTrades: number;
+		shortTrades: number;
+		callTrades: number;
+		putTrades: number;
+		totalCostBasis: number;
+		grossPnl: number;
+		taxAmount: number;
+		netPnl: number;
+		returnPct?: number;
+		winRate?: number;
+		positive?: boolean;
+	};
+	type TotalSummary = {
+		analyzedTradeCount: number;
+		totalCostBasis: number;
+		grossPnl: number;
+		taxAmount: number;
+		netPnl: number;
+		returnPct?: number;
+		positive?: boolean;
 	};
 	type ChartPoint = {
 		date: string;
@@ -106,6 +140,8 @@
 		marketSymbol: string;
 		cache: CacheStatus[];
 		summary: DashboardSummary;
+		optionSummary: OptionSummary;
+		totalSummary: TotalSummary;
 		chart: ChartPoint[];
 		trades: TradeRow[];
 		horizons: Horizon[];
@@ -277,11 +313,21 @@
 		return `${prefix} ${formatMoney(summary.timingDeltaPnl)} (${formatPercent(summary.timingDeltaReturnPct)})`;
 	}
 
+	function totalTitle(summary: TotalSummary) {
+		if (summary.positive === undefined) return 'Total pending';
+		return summary.positive ? 'Positive with options' : 'Negative with options';
+	}
+
+	function optionTitle(summary: OptionSummary) {
+		if (summary.positive === undefined) return 'Options pending';
+		return summary.positive ? 'Options positive' : 'Options negative';
+	}
+
 	function selectionLabel(symbols: string[], selected: string[]) {
-		if (symbols.length === 0) return 'No stocks';
-		if (selected.length === symbols.length) return 'All stocks';
-		if (selected.length === 0) return 'No stocks';
-		return `${selected.length} stocks`;
+		if (symbols.length === 0) return 'No symbols';
+		if (selected.length === symbols.length) return 'All symbols';
+		if (selected.length === 0) return 'No symbols';
+		return `${selected.length} symbols`;
 	}
 
 	function buildStatusBar(
@@ -373,6 +419,26 @@
 		return `${formatMoney(pnl)} ${formatPercent(returnPct)}`;
 	}
 
+	function optionMeta(trade: TradeRow) {
+		if (trade.assetType !== 'option') return trade.description;
+
+		const parts = [
+			trade.optionSide ? `${capitalize(trade.optionSide)} option` : 'Option',
+			trade.optionKind ? trade.optionKind.toUpperCase() : undefined,
+			trade.strike !== undefined ? formatMoney(trade.strike) : undefined,
+			trade.expirationDate ? `exp ${formatDate(trade.expirationDate)}` : undefined,
+		].filter(Boolean);
+		return parts.join(' · ');
+	}
+
+	function tradeLabel(trade: TradeRow) {
+		return trade.assetType === 'option' && trade.underlyingSymbol ? trade.underlyingSymbol : trade.symbol;
+	}
+
+	function tradeSubLabel(trade: TradeRow) {
+		return trade.assetType === 'option' ? trade.symbol : trade.description;
+	}
+
 	function metricTitle(metric: ComparisonMetric | null) {
 		if (!metric) return '';
 		return metric.shortTermGain ? `${formatDate(metric.targetDate)} - short term gains` : formatDate(metric.targetDate);
@@ -420,6 +486,10 @@
 		if (!trade.earliestBuyDate) return 'Unknown';
 		if (trade.earliestBuyDate === trade.latestBuyDate) return formatDate(trade.earliestBuyDate);
 		return `${formatDate(trade.earliestBuyDate)} to ${formatDate(trade.latestBuyDate)}`;
+	}
+
+	function capitalize(value: string) {
+		return value.charAt(0).toUpperCase() + value.slice(1);
 	}
 </script>
 
@@ -560,6 +630,40 @@
 			</article>
 		</section>
 
+		<section class="option-stats" aria-busy={loading}>
+			<article
+				class:positive={dashboard.totalSummary.positive === true}
+				class:negative={dashboard.totalSummary.positive === false}
+			>
+				<span>Stocks + options</span>
+				<strong>{totalTitle(dashboard.totalSummary)}</strong>
+				<p>
+					{formatMoney(dashboard.totalSummary.netPnl)}
+					{formatPercent(dashboard.totalSummary.returnPct)} across {dashboard.totalSummary.analyzedTradeCount}
+					closed trades
+				</p>
+			</article>
+			<article
+				class:positive={dashboard.optionSummary.positive === true}
+				class:negative={dashboard.optionSummary.positive === false}
+			>
+				<span>Options only</span>
+				<strong>{optionTitle(dashboard.optionSummary)}</strong>
+				<p>
+					{formatMoney(dashboard.optionSummary.netPnl)}
+					{formatPercent(dashboard.optionSummary.returnPct)} after tax
+				</p>
+			</article>
+			<article>
+				<span>Option hit rate</span>
+				<strong>{formatPercent(dashboard.optionSummary.winRate)}</strong>
+				<p>
+					{dashboard.optionSummary.winners} wins, {dashboard.optionSummary.losers} losses ·
+					{dashboard.optionSummary.callTrades} calls, {dashboard.optionSummary.putTrades} puts
+				</p>
+			</article>
+		</section>
+
 		<section class="chart-panel">
 			<div class="panel-heading">
 				<div>
@@ -612,11 +716,11 @@
 				<table>
 					<thead>
 						<tr>
-							<th>Sold</th>
-							<th>Stock</th>
-							<th>Buy window</th>
+							<th>Closed</th>
+							<th>Trade</th>
+							<th>Opened</th>
 							<th class="number">Qty</th>
-							<th class="number">Sold price</th>
+							<th class="number">Exit price</th>
 							<th class="number">Outcome</th>
 							{#each dashboard.horizons as horizon}
 								<th class="number">+{horizon.label}</th>
@@ -628,14 +732,25 @@
 					</thead>
 					<tbody>
 						{#each dashboard.trades as trade}
-							<tr>
+							<tr class:option-row={trade.assetType === 'option'}>
 								<td>{formatDate(trade.date)}</td>
 								<td>
-									<strong>{trade.symbol}</strong>
-									<span>{trade.description}</span>
+									<div class="trade-symbol-line">
+										<strong>{tradeLabel(trade)}</strong>
+										{#if trade.assetType === 'option'}
+											<span class="asset-badge">Option</span>
+										{/if}
+									</div>
+									<span>{tradeSubLabel(trade)}</span>
+									{#if trade.assetType === 'option'}
+										<span>{optionMeta(trade)}</span>
+									{/if}
 								</td>
 								<td>
 									{buyWindow(trade)}
+									{#if trade.assetType === 'option'}
+										<span>{trade.action}</span>
+									{/if}
 									{#if trade.unmatchedQuantity > 0}
 										<span>{formatNumber(trade.unmatchedQuantity)} unmatched</span>
 									{/if}
@@ -836,6 +951,7 @@
 	}
 
 	.verdict-grid,
+	.option-stats,
 	.chart-panel,
 	.table-panel,
 	.notice,
@@ -910,7 +1026,15 @@
 		margin-bottom: 14px;
 	}
 
+	.option-stats {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 12px;
+		margin-bottom: 14px;
+	}
+
 	.verdict-grid article,
+	.option-stats article,
 	.chart-panel,
 	.table-panel,
 	.notice {
@@ -925,6 +1049,12 @@
 		border-top: 4px solid var(--app-border);
 	}
 
+	.option-stats article {
+		min-height: 112px;
+		padding: 16px;
+		border-top: 4px solid var(--app-border);
+	}
+
 	.verdict-grid article.positive {
 		border-top-color: var(--app-success);
 	}
@@ -933,7 +1063,16 @@
 		border-top-color: var(--app-danger);
 	}
 
+	.option-stats article.positive {
+		border-top-color: var(--app-success);
+	}
+
+	.option-stats article.negative {
+		border-top-color: var(--app-danger);
+	}
+
 	.verdict-grid span,
+	.option-stats span,
 	.panel-heading p,
 	td span {
 		color: var(--app-muted);
@@ -948,7 +1087,21 @@
 		letter-spacing: 0;
 	}
 
+	.option-stats strong {
+		display: block;
+		margin-top: 12px;
+		font-size: 1.25rem;
+		line-height: 1.15;
+		letter-spacing: 0;
+	}
+
 	.verdict-grid p {
+		margin-top: 8px;
+		color: var(--app-muted);
+		line-height: 1.4;
+	}
+
+	.option-stats p {
 		margin-top: 8px;
 		color: var(--app-muted);
 		line-height: 1.4;
@@ -1057,7 +1210,7 @@
 
 	table {
 		width: 100%;
-		min-width: 1320px;
+		min-width: 1440px;
 		border-collapse: collapse;
 		font-size: 0.88rem;
 	}
@@ -1087,11 +1240,46 @@
 		margin-bottom: 2px;
 	}
 
+	.option-row {
+		background: color-mix(in srgb, var(--app-panel-strong) 42%, transparent);
+	}
+
+	.trade-symbol-line {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		margin-bottom: 2px;
+	}
+
+	.trade-symbol-line strong {
+		margin: 0;
+	}
+
+	.asset-badge {
+		display: inline-flex;
+		max-width: none;
+		border: 1px solid var(--app-accent);
+		border-radius: 999px;
+		padding: 2px 6px;
+		color: var(--app-accent);
+		font-size: 0.68rem;
+		font-weight: 800;
+		line-height: 1;
+		text-transform: uppercase;
+	}
+
 	td span {
 		display: block;
 		max-width: 220px;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+
+	td .asset-badge {
+		display: inline-flex;
+		max-width: none;
+		overflow: visible;
+		color: var(--app-accent);
 	}
 
 	.number,
@@ -1165,6 +1353,10 @@
 		}
 
 		.verdict-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.option-stats {
 			grid-template-columns: 1fr;
 		}
 
