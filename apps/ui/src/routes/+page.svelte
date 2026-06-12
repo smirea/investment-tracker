@@ -39,6 +39,9 @@
 		optionKind?: 'call' | 'put';
 		expirationDate?: string;
 		strike?: number;
+		openPosition?: boolean;
+		assumedCloseDate?: string;
+		pricedDate?: string;
 		marketPnl?: number;
 		marketReturnPct?: number;
 		later: Record<string, ComparisonMetric | null>;
@@ -63,6 +66,9 @@
 		expirationDate?: string;
 		strike?: number;
 		filterSymbol?: string;
+		openPosition?: boolean;
+		assumedCloseDate?: string;
+		pricedDate?: string;
 		analysis?: TradeRow;
 	};
 	type DashboardSummary = {
@@ -547,7 +553,36 @@
 	}
 
 	function transactionDateDetail(transaction: TransactionRow) {
+		if (transaction.openPosition || transaction.file === 'open positions') return transaction.rawDate;
 		return transaction.rawDate.includes(' as of ') ? transaction.rawDate : `line ${transaction.line}`;
+	}
+
+	function stockReturnScope() {
+		return taxSettings.taxesEnabled ? 'closed stock trades' : 'closed stock trades and open positions';
+	}
+
+	function stockOutcomeLabel() {
+		return taxSettings.taxesEnabled ? 'Realized outcome' : 'Stock outcome';
+	}
+
+	function analyzedTradeScope() {
+		return taxSettings.taxesEnabled ? 'analyzed trades' : 'analyzed trades/positions';
+	}
+
+	function totalTradeScope() {
+		return taxSettings.taxesEnabled ? 'closed trades' : 'trades/positions';
+	}
+
+	function taxBasisLabel() {
+		return taxSettings.taxesEnabled ? 'after tax' : 'before tax';
+	}
+
+	function stockReturnMethod() {
+		if (taxSettings.taxesEnabled) {
+			return 'Realized FIFO stock sells only; open positions, cash flows, interest, dividends, and options are not part of this line.';
+		}
+
+		return 'Realized FIFO stock sells plus open stock positions assumed sold on Wednesday of the current week; cash flows, interest, dividends, and options are not part of this line.';
 	}
 
 	function metricTitle(metric: ComparisonMetric | null) {
@@ -736,11 +771,11 @@
 				<p>{timingDetail(dashboard.summary)}</p>
 			</article>
 			<article>
-				<span>Realized outcome</span>
+				<span>{stockOutcomeLabel()}</span>
 				<strong>{formatMoney(dashboard.summary.actualPnl)}</strong>
 				<p>
 					{formatPercent(dashboard.summary.actualReturnPct)} across {dashboard.summary.analyzedTradeCount}
-					analyzed trades
+					{analyzedTradeScope()}
 				</p>
 			</article>
 		</section>
@@ -755,7 +790,7 @@
 				<p>
 					{formatMoney(dashboard.totalSummary.netPnl)}
 					{formatPercent(dashboard.totalSummary.returnPct)} across {dashboard.totalSummary.analyzedTradeCount}
-					closed trades
+					{totalTradeScope()}
 				</p>
 			</article>
 			<article
@@ -766,7 +801,8 @@
 				<strong>{optionTitle(dashboard.optionSummary)}</strong>
 				<p>
 					{formatMoney(dashboard.optionSummary.netPnl)}
-					{formatPercent(dashboard.optionSummary.returnPct)} after tax
+					{formatPercent(dashboard.optionSummary.returnPct)}
+					{taxBasisLabel()}
 				</p>
 			</article>
 			<article>
@@ -782,7 +818,7 @@
 		<section class="chart-panel return-card">
 			<h2>Rate of return</h2>
 			<p class="return-summary">
-				Your closed stock trades had a cumulative rate of return of
+				Your {stockReturnScope()} had a cumulative rate of return of
 				<strong>{formatPercent(dashboard.summary.actualReturnPct)}</strong>
 				{#if chartRange(dashboard.chart)}
 					from {formatDate(chartRange(dashboard.chart)?.start)} to {formatDate(chartRange(dashboard.chart)?.end)}.
@@ -795,10 +831,7 @@
 					for the selected symbols.
 				{/if}
 			</p>
-			<p class="return-method">
-				Realized FIFO stock sells only; open positions, cash flows, interest, dividends, and options are not part of
-				this line.
-			</p>
+			<p class="return-method">{stockReturnMethod()}</p>
 
 			{#if dashboard.chart.length > 1}
 				{@const yDomain = chartDomain(dashboard.chart)}
@@ -872,7 +905,7 @@
 					<span>Rate of Return</span>
 				</div>
 				<div class="return-table-row">
-					<span><i class="actual"></i>Closed stock trades</span>
+					<span><i class="actual"></i>{stockReturnScope()}</span>
 					<strong
 						>{formatPercent(displayedReturn(dashboard.summary.actualReturnPct, chartRange(dashboard.chart)))}</strong
 					>
@@ -902,7 +935,9 @@
 			<div class="panel-heading">
 				<div>
 					<h2>Transactions</h2>
-					<p>{dashboard.transactions.length} security transaction rows; outcomes populate for matched closes</p>
+					<p>
+						{dashboard.transactions.length} security rows; open stock positions appear in non-tax mode as assumed closes
+					</p>
 				</div>
 			</div>
 

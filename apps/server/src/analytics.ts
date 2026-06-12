@@ -94,12 +94,17 @@ export type CsvTransactionRow = {
 	expirationDate?: string;
 	strike?: number;
 	filterSymbol?: string;
+	openPosition?: boolean;
+	assumedCloseDate?: string;
+	pricedDate?: string;
 	analysis?: TradeRow;
 };
 
 type Lot = {
 	buyId: string;
 	date: string;
+	symbol: string;
+	description: string;
 	remainingQuantity: number;
 	costPerShare: number;
 };
@@ -145,6 +150,9 @@ type MatchedTrade = {
 	optionKind?: OptionKind;
 	expirationDate?: string;
 	strike?: number;
+	openPosition?: boolean;
+	assumedCloseDate?: string;
+	pricedDate?: string;
 	matches: Match[];
 };
 
@@ -268,24 +276,33 @@ export type TaxSettings = {
 export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 	const taxes = getTaxSettings(url);
 	const { files, transactions, stockTransactions, optionTransactions } = readTransactions();
-	const matchedStockTrades = matchTrades(stockTransactions);
+	const stockMatches = matchTrades(stockTransactions);
+	const matchedStockTrades = stockMatches.trades;
 	const matchedOptionTrades = matchOptions(optionTransactions);
-	const stockSymbols = [...new Set(matchedStockTrades.map(trade => trade.symbol))].sort();
+	const assumedCloseDate = currentWeekWednesday();
+	const eligibleOpenLots = stockMatches.openLots.filter(lot => lot.date <= assumedCloseDate);
+	const openStockSymbols = taxes.enabled ? [] : eligibleOpenLots.map(lot => lot.symbol);
+	const stockSymbols = [...new Set([...matchedStockTrades.map(trade => trade.symbol), ...openStockSymbols])].sort();
 	const optionSymbols = [...new Set(matchedOptionTrades.map(trade => trade.underlyingSymbol).filter(isDefinedString))];
 	const symbols = [...new Set([...stockSymbols, ...optionSymbols])].sort();
 	const selectedSymbols = getSelectedSymbols(url, symbols);
 	const selectedStockTrades = matchedStockTrades.filter(trade => selectedSymbols.includes(trade.symbol));
+	const selectedOpenStockLots = eligibleOpenLots.filter(lot => selectedSymbols.includes(lot.symbol));
 	const selectedOptionTrades = matchedOptionTrades.filter(
 		trade => trade.underlyingSymbol && selectedSymbols.includes(trade.underlyingSymbol),
 	);
 	const requiredSymbols = requiredSymbolsFor(selectedSymbols, stockSymbols);
 	const cache = await ensurePriceHistory(requiredSymbols);
 	const history = getPriceHistory(requiredSymbols);
-	const stockTrades = enrichTrades(selectedStockTrades, history, taxes);
+	const openStockTrades = taxes.enabled ? [] : buildOpenStockTrades(selectedOpenStockLots, history, assumedCloseDate);
+	const stockTrades = enrichTrades([...selectedStockTrades, ...openStockTrades], history, taxes);
 	const optionTrades = enrichTrades(selectedOptionTrades, history, taxes);
 	const trades = [...stockTrades, ...optionTrades];
 	const visibleTransactions = transactions.filter(isVisibleTransaction);
 	const selectedTransactions = filterCsvTransactions(visibleTransactions, selectedSymbols, symbols);
+	const tableTransactions = [...selectedTransactions, ...openStockTrades.map(openTradeTransaction)].sort(
+		(a, b) => (b.date ?? '').localeCompare(a.date ?? '') || a.line - b.line,
+	);
 
 	return {
 		ok: true,
@@ -301,16 +318,21 @@ export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 		totalSummary: summarizeTotal(stockTrades, optionTrades),
 		chart: buildChart(stockTrades),
 		trades: trades.sort((a, b) => b.date.localeCompare(a.date) || a.symbol.localeCompare(b.symbol)),
-		transactions: attachAnalysis(selectedTransactions, trades),
+		transactions: attachAnalysis(tableTransactions, trades),
 		horizons,
 	};
 }
 
 export function buildDashboardStatus(url: URL): DashboardStatusResponse {
+	const taxes = getTaxSettings(url);
 	const { files, stockTransactions, optionTransactions } = readTransactions();
-	const matchedStockTrades = matchTrades(stockTransactions);
+	const stockMatches = matchTrades(stockTransactions);
+	const matchedStockTrades = stockMatches.trades;
 	const matchedOptionTrades = matchOptions(optionTransactions);
-	const stockSymbols = [...new Set(matchedStockTrades.map(trade => trade.symbol))].sort();
+	const assumedCloseDate = currentWeekWednesday();
+	const eligibleOpenLots = stockMatches.openLots.filter(lot => lot.date <= assumedCloseDate);
+	const openStockSymbols = taxes.enabled ? [] : eligibleOpenLots.map(lot => lot.symbol);
+	const stockSymbols = [...new Set([...matchedStockTrades.map(trade => trade.symbol), ...openStockSymbols])].sort();
 	const optionSymbols = [...new Set(matchedOptionTrades.map(trade => trade.underlyingSymbol).filter(isDefinedString))];
 	const symbols = [...new Set([...stockSymbols, ...optionSymbols])].sort();
 	const selectedSymbols = getSelectedSymbols(url, symbols);
@@ -501,6 +523,8 @@ function matchTrades(transactions: StockTransaction[]) {
 			(lots.get(transaction.symbol) ?? lots.set(transaction.symbol, []).get(transaction.symbol)!).push({
 				buyId: transaction.id,
 				date: transaction.date,
+				symbol: transaction.symbol,
+				description: transaction.description,
 				remainingQuantity: transaction.quantity,
 				costPerShare: totalCost / transaction.quantity,
 			});
@@ -558,7 +582,87 @@ function matchTrades(transactions: StockTransaction[]) {
 		});
 	}
 
+	return {
+		trades,
+		openLots: [...lots.values()]
+			.flat()
+			.filter(lot => lot.remainingQuantity > 0.000001)
+			.sort((a, b) => a.symbol.localeCompare(b.symbol) || a.date.localeCompare(b.date)),
+	};
+}
+
+function buildOpenStockTrades(openLots: Lot[], history: PriceHistory, assumedCloseDate: string) {
+	const lotsBySymbol = new Map<string, Lot[]>();
+	for (const lot of openLots) {
+		(lotsBySymbol.get(lot.symbol) ?? lotsBySymbol.set(lot.symbol, []).get(lot.symbol)!).push(lot);
+	}
+
+	const trades: MatchedTrade[] = [];
+
+	for (const [symbol, lots] of lotsBySymbol) {
+		const point = priceOnOrBefore(history[symbol] ?? [], assumedCloseDate);
+		if (!point) continue;
+
+		const quantity = sum(lots.map(lot => lot.remainingQuantity));
+		const costBasis = sum(lots.map(lot => lot.remainingQuantity * lot.costPerShare));
+		const proceeds = point.adjustedClose * quantity;
+		const matches = lots.map(lot => ({
+			buyId: lot.buyId,
+			buyDate: lot.date,
+			quantity: lot.remainingQuantity,
+			costBasis: lot.remainingQuantity * lot.costPerShare,
+		}));
+		const buyDates = matches.map(match => match.buyDate).sort();
+
+		trades.push({
+			id: `open:${symbol}:${assumedCloseDate}`,
+			assetType: 'stock',
+			date: assumedCloseDate,
+			action: 'Open position',
+			symbol,
+			description: lots[0]?.description ?? `${symbol} open position`,
+			quantity,
+			matchedQuantity: quantity,
+			unmatchedQuantity: 0,
+			soldPrice: point.adjustedClose,
+			proceeds,
+			matchedProceeds: proceeds,
+			costBasis,
+			actualPnl: proceeds - costBasis,
+			actualReturnPct: costBasis > 0 ? (proceeds - costBasis) / costBasis : undefined,
+			earliestBuyDate: buyDates[0],
+			latestBuyDate: buyDates.at(-1),
+			holdingDays: weightedHoldingDays(matches, assumedCloseDate, costBasis),
+			openPosition: true,
+			assumedCloseDate,
+			pricedDate: point.date,
+			matches,
+		});
+	}
+
 	return trades;
+}
+
+function openTradeTransaction(trade: MatchedTrade): CsvTransactionRow {
+	return {
+		id: trade.id,
+		file: 'open positions',
+		line: 0,
+		date: trade.date,
+		rawDate:
+			trade.pricedDate && trade.pricedDate !== trade.date ? `${trade.date} priced ${trade.pricedDate}` : trade.date,
+		action: 'Open position',
+		symbol: trade.symbol,
+		description: `${trade.description} - assumed close`,
+		quantity: trade.quantity,
+		price: trade.soldPrice,
+		amount: trade.proceeds,
+		assetType: 'stock',
+		filterSymbol: trade.symbol,
+		openPosition: true,
+		assumedCloseDate: trade.assumedCloseDate,
+		pricedDate: trade.pricedDate,
+	};
 }
 
 function matchOptions(transactions: OptionTransaction[]) {
@@ -668,7 +772,7 @@ function enrichTrades(trades: MatchedTrade[], history: PriceHistory, taxes: TaxS
 		const marketHistory = history[marketSymbol] ?? [];
 		const actual = compareActual(trade, taxes);
 		const later =
-			trade.assetType === 'stock'
+			trade.assetType === 'stock' && !trade.openPosition
 				? Object.fromEntries(
 						horizons.map(horizon => [
 							horizon.key,
@@ -677,7 +781,7 @@ function enrichTrades(trades: MatchedTrade[], history: PriceHistory, taxes: TaxS
 					)
 				: emptyComparisons();
 		const earlier =
-			trade.assetType === 'stock'
+			trade.assetType === 'stock' && !trade.openPosition
 				? Object.fromEntries(
 						horizons.map(horizon => [
 							horizon.key,
@@ -1097,6 +1201,13 @@ function parseRate(value: string | null, fallback: number) {
 	const parsed = Number(value);
 	if (!Number.isFinite(parsed)) return fallback;
 	return Math.min(1, Math.max(0, parsed));
+}
+
+function currentWeekWednesday() {
+	const date = new Date();
+	const utcDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+	utcDate.setUTCDate(utcDate.getUTCDate() + (3 - utcDate.getUTCDay()));
+	return utcDate.toISOString().slice(0, 10);
 }
 
 function isShortTermHolding(buyDate: string, sellDate: string) {
