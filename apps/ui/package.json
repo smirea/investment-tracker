@@ -1,0 +1,23 @@
+{
+	"name": "@repo/ui",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "bun --env-file=../../.env --env-file=../../.env.local --bun vite build",
+		"check": "bun --env-file=../../.env --env-file=../../.env.local svelte-kit sync && bun --env-file=../../.env --env-file=../../.env.local svelte-check --tsconfig ./tsconfig.json",
+		"dev": "bun --env-file=../../.env --env-file=../../.env.local --bun vite",
+		"preview": "bun --env-file=../../.env --env-file=../../.env.local --bun vite preview"
+	},
+	"dependencies": {
+		"@sveltejs/adapter-static": "^3.0.9",
+		"@sveltejs/kit": "^2.48.4",
+		"svelte": "^5.41.3",
+		"vite": "^7.1.12"
+	},
+	"devDependencies": {
+		"@tailwindcss/vite": "^4.3.0",
+		"svelte-check": "^4.3.3",
+		"tailwindcss": "^4.3.0",
+		"typescript": "^6.0.3"
+	}
+}
