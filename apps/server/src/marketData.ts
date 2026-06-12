@@ -26,6 +26,22 @@ export type CacheStatus = {
 	error?: string;
 };
 
+export type PriceHistoryReadiness = {
+	symbol: string;
+	state: 'ready' | 'missing' | 'refreshing' | 'blocked';
+	status?: CacheStatus['status'];
+	lastFetchAt?: string;
+	rowCount: number;
+	error?: string;
+};
+
+export type PriceHistoryRun = {
+	startedAt: string;
+	currentSymbol?: string;
+	completedSymbols: string[];
+	remainingSymbols: string[];
+};
+
 type AlphaVantageWeeklyResponse = {
 	'Weekly Adjusted Time Series'?: Record<
 		string,
@@ -44,47 +60,70 @@ type AlphaVantageWeeklyResponse = {
 	Information?: string;
 };
 
+let activePriceHistoryRun: (PriceHistoryRun & { id: number; symbols: string[] }) | undefined;
+let nextPriceHistoryRunId = 1;
+
 export async function ensurePriceHistory(symbols: string[]) {
 	const uniqueSymbols = normalizeSymbols(symbols);
 	const statuses: CacheStatus[] = [];
 	let shouldStopFetching = false;
+	const run: PriceHistoryRun & { id: number; symbols: string[] } = {
+		id: nextPriceHistoryRunId++,
+		symbols: uniqueSymbols,
+		startedAt: new Date().toISOString(),
+		completedSymbols: [] as string[],
+		remainingSymbols: [...uniqueSymbols],
+	};
+	activePriceHistoryRun = run;
 
-	for (const symbol of uniqueSymbols) {
-		const cached = getCache(symbol);
-		if (cached && shouldUseCachedStatus(cached)) {
-			statuses.push({
-				symbol,
-				status: cached.rowCount > 0 ? 'cached' : (cached.status as CacheStatus['status']),
-				lastFetchAt: cached.lastFetchAt ?? undefined,
-				rowCount: cached.rowCount,
-				error: cached.error ?? undefined,
-			});
-			continue;
+	try {
+		for (const [index, symbol] of uniqueSymbols.entries()) {
+			run.currentSymbol = symbol;
+			run.remainingSymbols = uniqueSymbols.slice(index);
+
+			try {
+				const cached = getCache(symbol);
+				if (cached && shouldUseCachedStatus(cached)) {
+					statuses.push({
+						symbol,
+						status: cached.rowCount > 0 ? 'cached' : (cached.status as CacheStatus['status']),
+						lastFetchAt: cached.lastFetchAt ?? undefined,
+						rowCount: cached.rowCount,
+						error: cached.error ?? undefined,
+					});
+					continue;
+				}
+
+				if (!canFetchPriceHistory()) {
+					statuses.push(markCache(symbol, 'skipped', cached?.rowCount ?? 0, 'ALPHAVANTAGE_KEY is empty'));
+					continue;
+				}
+
+				if (shouldStopFetching) {
+					statuses.push(markCache(symbol, 'skipped', cached?.rowCount ?? 0, 'Alpha Vantage request limit reached'));
+					continue;
+				}
+
+				await waitForAlphaVantageSlot();
+				const result = await fetchWeeklyAdjustedPrices(symbol);
+				if (result.ok) {
+					savePrices(result.points);
+					statuses.push(markCache(symbol, 'fetched', result.points.length));
+					continue;
+				}
+
+				if (isLimitMessage(result.error)) shouldStopFetching = true;
+				statuses.push(markCache(symbol, 'error', cached?.rowCount ?? 0, result.error));
+			} finally {
+				if (!run.completedSymbols.includes(symbol)) run.completedSymbols.push(symbol);
+				run.remainingSymbols = uniqueSymbols.slice(index + 1);
+			}
 		}
 
-		if (!env.ALPHAVANTAGE_KEY.trim()) {
-			statuses.push(markCache(symbol, 'skipped', cached?.rowCount ?? 0, 'ALPHAVANTAGE_KEY is empty'));
-			continue;
-		}
-
-		if (shouldStopFetching) {
-			statuses.push(markCache(symbol, 'skipped', cached?.rowCount ?? 0, 'Alpha Vantage request limit reached'));
-			continue;
-		}
-
-		await waitForAlphaVantageSlot();
-		const result = await fetchWeeklyAdjustedPrices(symbol);
-		if (result.ok) {
-			savePrices(result.points);
-			statuses.push(markCache(symbol, 'fetched', result.points.length));
-			continue;
-		}
-
-		if (isLimitMessage(result.error)) shouldStopFetching = true;
-		statuses.push(markCache(symbol, 'error', cached?.rowCount ?? 0, result.error));
+		return statuses;
+	} finally {
+		if (activePriceHistoryRun?.id === run.id) activePriceHistoryRun = undefined;
 	}
-
-	return statuses;
 }
 
 export function getPriceHistory(symbols: string[]) {
@@ -112,6 +151,59 @@ export function getPriceHistory(symbols: string[]) {
 	}
 
 	return history;
+}
+
+export function getPriceHistoryReadiness(symbols: string[]) {
+	const uniqueSymbols = normalizeSymbols(symbols);
+	if (uniqueSymbols.length === 0) return [] satisfies PriceHistoryReadiness[];
+
+	const rows = db.select().from(symbolCache).where(inArray(symbolCache.symbol, uniqueSymbols)).all();
+	const rowsBySymbol = new Map(rows.map(row => [row.symbol, row]));
+
+	return uniqueSymbols.map(symbol => {
+		const cached = rowsBySymbol.get(symbol);
+		const base = {
+			symbol,
+			lastFetchAt: cached?.lastFetchAt ?? undefined,
+			rowCount: cached?.rowCount ?? 0,
+			error: cached?.error ?? undefined,
+		};
+
+		if (!cached) return { ...base, state: 'missing' as const };
+		if (cached.rowCount > 0 && shouldUseCachedStatus(cached)) {
+			return { ...base, state: 'ready' as const, status: 'cached' as const };
+		}
+		if (cached.rowCount > 0) {
+			return { ...base, state: 'refreshing' as const, status: cached.status as CacheStatus['status'] };
+		}
+		if (shouldUseCachedStatus(cached) && (cached.status === 'error' || cached.status === 'skipped')) {
+			return { ...base, state: 'blocked' as const, status: cached.status as CacheStatus['status'] };
+		}
+
+		return { ...base, state: 'missing' as const, status: cached.status as CacheStatus['status'] };
+	}) satisfies PriceHistoryReadiness[];
+}
+
+export function getPriceHistoryRun(symbols: string[]) {
+	if (!activePriceHistoryRun) return;
+
+	const requested = new Set(normalizeSymbols(symbols));
+	const relevantSymbols = activePriceHistoryRun.symbols.filter(symbol => requested.has(symbol));
+	if (relevantSymbols.length === 0) return;
+
+	return {
+		startedAt: activePriceHistoryRun.startedAt,
+		currentSymbol:
+			activePriceHistoryRun.currentSymbol && requested.has(activePriceHistoryRun.currentSymbol)
+				? activePriceHistoryRun.currentSymbol
+				: undefined,
+		completedSymbols: activePriceHistoryRun.completedSymbols.filter(symbol => requested.has(symbol)),
+		remainingSymbols: activePriceHistoryRun.remainingSymbols.filter(symbol => requested.has(symbol)),
+	} satisfies PriceHistoryRun;
+}
+
+export function canFetchPriceHistory() {
+	return env.ALPHAVANTAGE_KEY.trim().length > 0;
 }
 
 function getCache(symbol: string) {

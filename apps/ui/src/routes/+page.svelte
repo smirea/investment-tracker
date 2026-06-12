@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import createLocalStorage, { type LocalStorage } from '$lib/createLocalStorage';
 
 	type Horizon = { key: string; label: string; months: number };
@@ -65,6 +65,38 @@
 		rowCount: number;
 		error?: string;
 	};
+	type PriceDataStatus = {
+		symbol: string;
+		state: 'ready' | 'missing' | 'refreshing' | 'blocked';
+		status?: CacheStatus['status'];
+		lastFetchAt?: string;
+		rowCount: number;
+		error?: string;
+	};
+	type DashboardProgress = {
+		ok: true;
+		generatedAt: string;
+		csvFiles: string[];
+		symbols: string[];
+		selectedSymbols: string[];
+		marketSymbol: string;
+		requiredSymbols: string[];
+		priceData: PriceDataStatus[];
+		activeFetch?: {
+			startedAt: string;
+			currentSymbol?: string;
+			completedSymbols: string[];
+			remainingSymbols: string[];
+		};
+		readyCount: number;
+		totalCount: number;
+		missingSymbols: string[];
+		refreshingSymbols: string[];
+		blockedSymbols: PriceDataStatus[];
+		tasks: string[];
+		done: boolean;
+		canFetch: boolean;
+	};
 	type DashboardResponse = {
 		ok: true;
 		generatedAt: string;
@@ -83,6 +115,12 @@
 		shortTermTaxRate: number;
 		longTermTaxRate: number;
 	};
+	type StatusBar = {
+		tone: 'working' | 'warning';
+		title: string;
+		detail: string;
+		tasks: string[];
+	};
 
 	const chartWidth = 900;
 	const chartHeight = 320;
@@ -94,17 +132,22 @@
 	};
 
 	let dashboard = $state<DashboardResponse | undefined>();
+	let progress = $state<DashboardProgress | undefined>();
 	let selectedSymbols = $state<string[]>([]);
 	let taxSettings = $state<DashboardSettings>({ ...defaultDashboardSettings });
 	let settingsStorage: LocalStorage<DashboardSettings> | undefined;
 	let loading = $state(true);
 	let error = $state<string | undefined>();
 	let menuOpen = $state(false);
+	let activeLoadId = 0;
+	let progressPoll: ReturnType<typeof setInterval> | undefined;
+	let dashboardAbort: AbortController | undefined;
 
 	let unavailableCache = $derived(
 		dashboard?.cache.filter(item => item.status === 'error' || item.status === 'skipped') ?? [],
 	);
 	let selectedLabel = $derived(selectionLabel(dashboard?.symbols ?? [], selectedSymbols));
+	let topStatus = $derived(buildStatusBar(progress, dashboard, loading));
 
 	onMount(() => {
 		document.documentElement.dataset.theme = 'dark';
@@ -116,27 +159,74 @@
 		void loadDashboard(undefined, taxSettings);
 	});
 
+	onDestroy(() => {
+		stopProgressPolling();
+		dashboardAbort?.abort();
+	});
+
 	async function loadDashboard(nextSymbols?: string[], nextTaxSettings = taxSettings) {
+		const loadId = ++activeLoadId;
+		dashboardAbort?.abort();
+		const controller = new AbortController();
+		dashboardAbort = controller;
 		loading = true;
 		error = undefined;
 
+		const params = dashboardParams(nextSymbols, nextTaxSettings);
+		void refreshProgress(params, loadId);
+		startProgressPolling(params, loadId);
+
+		try {
+			const response = await fetch(apiUrl('/api/dashboard', params), { signal: controller.signal });
+			const data = await response.json();
+			if (!response.ok || !data.ok) throw new Error(data.error ?? 'Dashboard request failed');
+			if (loadId !== activeLoadId) return;
+
+			dashboard = data as DashboardResponse;
+			selectedSymbols = dashboard.selectedSymbols;
+		} catch (err) {
+			if (err instanceof DOMException && err.name === 'AbortError') return;
+			error = err instanceof Error ? err.message : String(err);
+		} finally {
+			if (loadId === activeLoadId) {
+				loading = false;
+				stopProgressPolling();
+				void refreshProgress(params, loadId);
+			}
+		}
+	}
+
+	function dashboardParams(nextSymbols?: string[], nextTaxSettings = taxSettings) {
 		const params = new URLSearchParams();
 		if (nextSymbols) params.set('symbols', nextSymbols.join(','));
 		params.set('taxes', nextTaxSettings.taxesEnabled ? '1' : '0');
 		params.set('shortTermTaxRate', String(nextTaxSettings.shortTermTaxRate / 100));
 		params.set('longTermTaxRate', String(nextTaxSettings.longTermTaxRate / 100));
+		return params;
+	}
 
+	function apiUrl(path: string, params: URLSearchParams) {
+		return `${path}${params.size ? `?${params}` : ''}`;
+	}
+
+	function startProgressPolling(params: URLSearchParams, loadId: number) {
+		stopProgressPolling();
+		progressPoll = setInterval(() => void refreshProgress(params, loadId), 1500);
+	}
+
+	function stopProgressPolling() {
+		if (progressPoll) clearInterval(progressPoll);
+		progressPoll = undefined;
+	}
+
+	async function refreshProgress(params: URLSearchParams, loadId: number) {
 		try {
-			const response = await fetch(`/api/dashboard${params.size ? `?${params}` : ''}`);
+			const response = await fetch(apiUrl('/api/dashboard/status', params));
 			const data = await response.json();
-			if (!response.ok || !data.ok) throw new Error(data.error ?? 'Dashboard request failed');
-
-			dashboard = data as DashboardResponse;
-			selectedSymbols = dashboard.selectedSymbols;
-		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
-		} finally {
-			loading = false;
+			if (!response.ok || !data.ok) throw new Error(data.error ?? 'Dashboard status failed');
+			if (loadId === activeLoadId) progress = data as DashboardProgress;
+		} catch {
+			if (loadId === activeLoadId && !dashboard) progress = undefined;
 		}
 	}
 
@@ -192,6 +282,44 @@
 		if (selected.length === symbols.length) return 'All stocks';
 		if (selected.length === 0) return 'No stocks';
 		return `${selected.length} stocks`;
+	}
+
+	function buildStatusBar(
+		nextProgress: DashboardProgress | undefined,
+		nextDashboard: DashboardResponse | undefined,
+		isLoading: boolean,
+	): StatusBar | undefined {
+		if (nextProgress && (!nextProgress.done || isLoading)) {
+			const blocked = nextProgress.blockedSymbols.length > 0 || !nextProgress.canFetch;
+			return {
+				tone: blocked ? 'warning' : 'working',
+				title: nextProgress.done ? 'Calculating dashboard' : 'Preparing market data',
+				detail: `${nextProgress.readyCount} of ${nextProgress.totalCount} price histories ready.`,
+				tasks: nextProgress.tasks.length > 0 ? nextProgress.tasks : ['Finish dashboard calculations'],
+			};
+		}
+
+		const incompleteCache =
+			nextDashboard?.cache.filter(
+				item => (item.status === 'error' || item.status === 'skipped') && item.rowCount === 0,
+			) ?? [];
+		if (incompleteCache.length > 0) {
+			return {
+				tone: 'warning',
+				title: 'Price data incomplete',
+				detail: `${incompleteCache.length} price histories still need data before every comparison is available.`,
+				tasks: incompleteCache.map(item => `${item.symbol}: ${item.error ?? item.status}`),
+			};
+		}
+
+		if (isLoading) {
+			return {
+				tone: 'working',
+				title: 'Preparing dashboard',
+				detail: 'Reading trades and checking cached Alpha Vantage prices.',
+				tasks: [],
+			};
+		}
 	}
 
 	function chartPath(points: ChartPoint[], key: 'actualReturnPct' | 'marketReturnPct') {
@@ -382,6 +510,23 @@
 			</div>
 		</div>
 	</header>
+
+	{#if topStatus}
+		<section class:warning={topStatus.tone === 'warning'} class="status-bar" role="status" aria-live="polite">
+			<div>
+				<strong>{topStatus.title}</strong>
+				<p>{topStatus.detail}</p>
+			</div>
+			{#if topStatus.tasks.length > 0}
+				<div class="status-tasks" aria-label="Left to do">
+					<span>Left</span>
+					{#each topStatus.tasks as task}
+						<span class="status-task">{task}</span>
+					{/each}
+				</div>
+			{/if}
+		</section>
+	{/if}
 
 	{#if error}
 		<section class="notice error-panel">{error}</section>
@@ -694,10 +839,68 @@
 	.chart-panel,
 	.table-panel,
 	.notice,
+	.status-bar,
 	.cache-strip {
 		max-width: 1520px;
 		margin-left: auto;
 		margin-right: auto;
+	}
+
+	.status-bar {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 18px;
+		margin-bottom: 14px;
+		border: 1px solid var(--app-border);
+		border-left: 4px solid var(--app-accent);
+		border-radius: 8px;
+		background: var(--app-panel-strong);
+		padding: 13px 14px;
+	}
+
+	.status-bar.warning {
+		border-left-color: var(--app-warning);
+	}
+
+	.status-bar strong {
+		display: block;
+		font-size: 0.98rem;
+		line-height: 1.25;
+	}
+
+	.status-bar p {
+		margin-top: 3px;
+		color: var(--app-muted);
+		font-size: 0.86rem;
+		line-height: 1.4;
+	}
+
+	.status-tasks {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+		gap: 6px;
+		min-width: min(520px, 48%);
+	}
+
+	.status-tasks > span:first-child {
+		align-self: center;
+		color: var(--app-muted);
+		font-size: 0.74rem;
+		font-weight: 800;
+		text-transform: uppercase;
+	}
+
+	.status-task {
+		border: 1px solid var(--app-border);
+		border-radius: 999px;
+		background: var(--app-panel);
+		padding: 5px 9px;
+		color: var(--app-text);
+		font-size: 0.78rem;
+		font-weight: 700;
+		line-height: 1.25;
 	}
 
 	.verdict-grid {
@@ -963,6 +1166,15 @@
 
 		.verdict-grid {
 			grid-template-columns: 1fr;
+		}
+
+		.status-bar {
+			flex-direction: column;
+		}
+
+		.status-tasks {
+			justify-content: flex-start;
+			min-width: 0;
 		}
 
 		.panel-heading {

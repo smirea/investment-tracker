@@ -2,9 +2,14 @@ import { parse } from 'csv-parse/sync';
 import { readdirSync, readFileSync } from 'node:fs';
 
 import {
+	canFetchPriceHistory,
 	ensurePriceHistory,
+	getPriceHistoryReadiness,
+	getPriceHistoryRun,
 	getPriceHistory,
 	type CacheStatus,
+	type PriceHistoryReadiness,
+	type PriceHistoryRun,
 	type PriceHistory,
 	type PricePoint,
 } from './marketData';
@@ -141,6 +146,26 @@ export type DashboardResponse = {
 	horizons: typeof horizons;
 };
 
+export type DashboardStatusResponse = {
+	ok: true;
+	generatedAt: string;
+	csvFiles: string[];
+	symbols: string[];
+	selectedSymbols: string[];
+	marketSymbol: string;
+	requiredSymbols: string[];
+	priceData: PriceHistoryReadiness[];
+	activeFetch?: PriceHistoryRun;
+	readyCount: number;
+	totalCount: number;
+	missingSymbols: string[];
+	refreshingSymbols: string[];
+	blockedSymbols: PriceHistoryReadiness[];
+	tasks: string[];
+	done: boolean;
+	canFetch: boolean;
+};
+
 export type TaxSettings = {
 	enabled: boolean;
 	shortTermRate: number;
@@ -154,7 +179,7 @@ export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 	const symbols = [...new Set(matchedTrades.map(trade => trade.symbol))].sort();
 	const selectedSymbols = getSelectedSymbols(url, symbols);
 	const selectedTrades = matchedTrades.filter(trade => selectedSymbols.includes(trade.symbol));
-	const requiredSymbols = selectedSymbols.length > 0 ? [...selectedSymbols, marketSymbol] : [marketSymbol];
+	const requiredSymbols = requiredSymbolsFor(selectedSymbols);
 	const cache = await ensurePriceHistory(requiredSymbols);
 	const history = getPriceHistory(requiredSymbols);
 	const trades = enrichTrades(selectedTrades, history, taxes);
@@ -172,6 +197,47 @@ export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 		chart: buildChart(trades),
 		trades: trades.sort((a, b) => b.date.localeCompare(a.date) || a.symbol.localeCompare(b.symbol)),
 		horizons,
+	};
+}
+
+export function buildDashboardStatus(url: URL): DashboardStatusResponse {
+	const { files, transactions } = readStockTransactions();
+	const matchedTrades = matchTrades(transactions);
+	const symbols = [...new Set(matchedTrades.map(trade => trade.symbol))].sort();
+	const selectedSymbols = getSelectedSymbols(url, symbols);
+	const requiredSymbols = requiredSymbolsFor(selectedSymbols);
+	const priceData = getPriceHistoryReadiness(requiredSymbols);
+	const activeFetch = getPriceHistoryRun(requiredSymbols);
+	const missingSymbols = priceData.filter(item => item.state === 'missing').map(item => item.symbol);
+	const refreshingSymbols = priceData.filter(item => item.state === 'refreshing').map(item => item.symbol);
+	const blockedSymbols = priceData.filter(item => item.state === 'blocked');
+	const readyCount = priceData.filter(item => item.state === 'ready').length;
+	const tasks = statusTasks({
+		activeFetch,
+		missingSymbols,
+		refreshingSymbols,
+		blockedSymbols,
+		canFetch: canFetchPriceHistory(),
+	});
+
+	return {
+		ok: true,
+		generatedAt: new Date().toISOString(),
+		csvFiles: files,
+		symbols,
+		selectedSymbols,
+		marketSymbol,
+		requiredSymbols,
+		priceData,
+		activeFetch,
+		readyCount,
+		totalCount: requiredSymbols.length,
+		missingSymbols,
+		refreshingSymbols,
+		blockedSymbols,
+		tasks,
+		done: tasks.length === 0,
+		canFetch: canFetchPriceHistory(),
 	};
 }
 
@@ -505,6 +571,59 @@ function getSelectedSymbols(url: URL, symbols: string[]) {
 	);
 
 	return symbols.filter(symbol => requested.has(symbol));
+}
+
+function requiredSymbolsFor(selectedSymbols: string[]) {
+	return selectedSymbols.length > 0 ? [...selectedSymbols, marketSymbol] : [marketSymbol];
+}
+
+function statusTasks({
+	activeFetch,
+	missingSymbols,
+	refreshingSymbols,
+	blockedSymbols,
+	canFetch,
+}: {
+	activeFetch?: PriceHistoryRun;
+	missingSymbols: string[];
+	refreshingSymbols: string[];
+	blockedSymbols: PriceHistoryReadiness[];
+	canFetch: boolean;
+}) {
+	const tasks: string[] = [];
+
+	if (activeFetch?.currentSymbol) {
+		tasks.push(`Fetching ${activeFetch.currentSymbol} from Alpha Vantage`);
+	}
+
+	const symbolsToFetch = [...new Set([...missingSymbols, ...refreshingSymbols])].filter(
+		symbol => symbol !== activeFetch?.currentSymbol,
+	);
+	if (symbolsToFetch.length > 0) {
+		tasks.push(
+			canFetch
+				? `Fetch ${symbolList(symbolsToFetch)}`
+				: `Set ALPHAVANTAGE_KEY before fetching ${symbolList(symbolsToFetch)}`,
+		);
+	}
+
+	if (blockedSymbols.length > 0) {
+		const sample = blockedSymbols[0];
+		tasks.push(
+			`Resolve ${symbolList(blockedSymbols.map(item => item.symbol))}: ${sample.error ?? sample.status ?? 'cache unavailable'}`,
+		);
+	}
+
+	if (tasks.length === 0 && activeFetch) {
+		tasks.push('Finishing dashboard calculations');
+	}
+
+	return tasks;
+}
+
+function symbolList(symbols: string[]) {
+	if (symbols.length <= 5) return symbols.join(', ');
+	return `${symbols.slice(0, 5).join(', ')} and ${symbols.length - 5} more`;
 }
 
 type ProfitLine = {

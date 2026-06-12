@@ -1,6 +1,6 @@
 import env from '@repo/shared/env';
 
-import { buildDashboard } from './analytics';
+import { buildDashboard, buildDashboardStatus } from './analytics';
 
 const uiBuildPath = new URL('../../ui/build/', import.meta.url);
 
@@ -13,6 +13,18 @@ const server = Bun.serve({
 	},
 	async fetch(request) {
 		const url = new URL(request.url);
+
+		if (url.pathname === '/api/dashboard/status') {
+			try {
+				return Response.json(buildDashboardStatus(url));
+			} catch (error) {
+				console.error(error);
+				return Response.json(
+					{ ok: false, error: error instanceof Error ? error.message : String(error) },
+					{ status: 500 },
+				);
+			}
+		}
 
 		if (url.pathname === '/api/dashboard') {
 			try {
