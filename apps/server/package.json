@@ -12,6 +12,8 @@
 		"typecheck": "tsc --noEmit -p tsconfig.json"
 	},
 	"dependencies": {
-		"@repo/shared": "workspace:*"
+		"@repo/shared": "workspace:*",
+		"csv-parse": "^6.2.1",
+		"drizzle-orm": "^0.45.2"
 	}
 }

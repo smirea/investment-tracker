@@ -1,14 +1,21 @@
-html[data-theme] {
+:root,
+html[data-theme='dark'] {
 	color-scheme: dark;
 	--app-bg: #0d1117;
 	--app-text: #f4f7fb;
 	--app-muted: #9ca8b7;
 	--app-panel: #151b23;
+	--app-panel-strong: #1b2430;
 	--app-panel-text: #f4f7fb;
 	--app-border: #303946;
 	--app-accent: #7dd3b0;
 	--app-accent-ink: #07130f;
 	--app-error: #ff7b8a;
+	--app-success: #64d391;
+	--app-danger: #ff7b8a;
+	--app-warning: #f5c76b;
+	--app-chart-a: #73a7ff;
+	--app-chart-b: #f5c76b;
 }
 
 html[data-theme='light'] {
@@ -17,9 +24,15 @@ html[data-theme='light'] {
 	--app-text: #172026;
 	--app-muted: #5e6a72;
 	--app-panel: #ffffff;
+	--app-panel-strong: #f1f4f6;
 	--app-panel-text: #172026;
 	--app-border: #d5dde3;
 	--app-accent: #176b55;
 	--app-accent-ink: #ffffff;
 	--app-error: #b42335;
+	--app-success: #137a4a;
+	--app-danger: #b42335;
+	--app-warning: #996c00;
+	--app-chart-a: #2563eb;
+	--app-chart-b: #b7791f;
 }

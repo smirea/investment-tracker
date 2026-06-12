@@ -1,5 +1,7 @@
 import env from '@repo/shared/env';
 
+import { buildDashboard } from './analytics';
+
 const uiBuildPath = new URL('../../ui/build/', import.meta.url);
 
 const server = Bun.serve({
@@ -11,6 +13,18 @@ const server = Bun.serve({
 	},
 	async fetch(request) {
 		const url = new URL(request.url);
+
+		if (url.pathname === '/api/dashboard') {
+			try {
+				return Response.json(await buildDashboard(url));
+			} catch (error) {
+				console.error(error);
+				return Response.json(
+					{ ok: false, error: error instanceof Error ? error.message : String(error) },
+					{ status: 500 },
+				);
+			}
+		}
 
 		if (url.pathname.startsWith('/api/')) {
 			return Response.json({ ok: false, error: 'Not found' }, { status: 404 });
