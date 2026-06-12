@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import createLocalStorage, { type LocalStorage } from '$lib/createLocalStorage';
 
 	type Horizon = { key: string; label: string; months: number };
 	type ComparisonMetric = {
@@ -9,6 +10,8 @@
 		returnPct: number;
 		deltaPnl: number;
 		deltaReturnPct: number;
+		taxAmount: number;
+		shortTermGain: boolean;
 	};
 	type TradeRow = {
 		id: string;
@@ -26,6 +29,9 @@
 		earliestBuyDate?: string;
 		latestBuyDate?: string;
 		holdingDays?: number;
+		grossActualPnl?: number;
+		taxAmount?: number;
+		shortTermGain: boolean;
 		marketPnl?: number;
 		marketReturnPct?: number;
 		later: Record<string, ComparisonMetric | null>;
@@ -72,13 +78,25 @@
 		trades: TradeRow[];
 		horizons: Horizon[];
 	};
+	type DashboardSettings = {
+		taxesEnabled: boolean;
+		shortTermTaxRate: number;
+		longTermTaxRate: number;
+	};
 
 	const chartWidth = 900;
 	const chartHeight = 320;
 	const chartPad = { top: 18, right: 20, bottom: 34, left: 54 };
+	const defaultDashboardSettings: DashboardSettings = {
+		taxesEnabled: true,
+		shortTermTaxRate: 40.8,
+		longTermTaxRate: 23.8,
+	};
 
 	let dashboard = $state<DashboardResponse | undefined>();
 	let selectedSymbols = $state<string[]>([]);
+	let taxSettings = $state<DashboardSettings>({ ...defaultDashboardSettings });
+	let settingsStorage: LocalStorage<DashboardSettings> | undefined;
 	let loading = $state(true);
 	let error = $state<string | undefined>();
 	let menuOpen = $state(false);
@@ -90,15 +108,23 @@
 
 	onMount(() => {
 		document.documentElement.dataset.theme = 'dark';
-		void loadDashboard();
+		settingsStorage = createLocalStorage<DashboardSettings>({
+			namespace: 'investment-tracker',
+			getDefaults: () => defaultDashboardSettings,
+		}).LS;
+		taxSettings = settingsStorage.getAll();
+		void loadDashboard(undefined, taxSettings);
 	});
 
-	async function loadDashboard(nextSymbols?: string[]) {
+	async function loadDashboard(nextSymbols?: string[], nextTaxSettings = taxSettings) {
 		loading = true;
 		error = undefined;
 
 		const params = new URLSearchParams();
 		if (nextSymbols) params.set('symbols', nextSymbols.join(','));
+		params.set('taxes', nextTaxSettings.taxesEnabled ? '1' : '0');
+		params.set('shortTermTaxRate', String(nextTaxSettings.shortTermTaxRate / 100));
+		params.set('longTermTaxRate', String(nextTaxSettings.longTermTaxRate / 100));
 
 		try {
 			const response = await fetch(`/api/dashboard${params.size ? `?${params}` : ''}`);
@@ -117,6 +143,12 @@
 	function setSymbols(symbols: string[]) {
 		selectedSymbols = [...symbols].sort();
 		void loadDashboard(selectedSymbols);
+	}
+
+	function updateTaxSettings(diff: Partial<DashboardSettings>) {
+		taxSettings = { ...taxSettings, ...diff };
+		settingsStorage?.set(diff);
+		void loadDashboard(selectedSymbols, taxSettings);
 	}
 
 	function toggleSymbol(symbol: string, checked: boolean) {
@@ -213,6 +245,20 @@
 		return `${formatMoney(pnl)} ${formatPercent(returnPct)}`;
 	}
 
+	function metricTitle(metric: ComparisonMetric | null) {
+		if (!metric) return '';
+		return metric.shortTermGain ? `${formatDate(metric.targetDate)} - short term gains` : formatDate(metric.targetDate);
+	}
+
+	function shortTermTitle(shortTermGain: boolean) {
+		return shortTermGain ? 'short term gains' : '';
+	}
+
+	function numberInputValue(value: number, fallback: number) {
+		if (!Number.isFinite(value)) return fallback;
+		return Math.min(100, Math.max(0, value));
+	}
+
 	function formatMoney(value?: number) {
 		if (value === undefined) return '—';
 		return new Intl.NumberFormat('en-US', {
@@ -260,29 +306,80 @@
 			<h1>Trade dashboard</h1>
 		</div>
 
-		<div class="filter">
-			<button class="filter-button" type="button" onclick={() => (menuOpen = !menuOpen)}>
-				<span>{selectedLabel}</span>
-				<span aria-hidden="true">v</span>
-			</button>
-			{#if menuOpen && dashboard}
-				<div class="filter-menu">
-					<div class="filter-actions">
-						<button type="button" onclick={() => setSymbols(dashboard?.symbols ?? [])}>All</button>
-						<button type="button" onclick={() => setSymbols([])}>None</button>
+		<div class="header-controls">
+			<div class="tax-controls">
+				<label class="tax-toggle">
+					<input
+						type="checkbox"
+						checked={taxSettings.taxesEnabled}
+						onchange={event => updateTaxSettings({ taxesEnabled: event.currentTarget.checked })}
+					/>
+					<span>Taxes</span>
+				</label>
+				<label class="tax-rate">
+					<span>Short term</span>
+					<input
+						type="number"
+						min="0"
+						max="100"
+						step="0.1"
+						value={taxSettings.shortTermTaxRate}
+						disabled={!taxSettings.taxesEnabled}
+						onchange={event =>
+							updateTaxSettings({
+								shortTermTaxRate: numberInputValue(
+									event.currentTarget.valueAsNumber,
+									defaultDashboardSettings.shortTermTaxRate,
+								),
+							})}
+					/>
+					<span>%</span>
+				</label>
+				<label class="tax-rate">
+					<span>Long term</span>
+					<input
+						type="number"
+						min="0"
+						max="100"
+						step="0.1"
+						value={taxSettings.longTermTaxRate}
+						disabled={!taxSettings.taxesEnabled}
+						onchange={event =>
+							updateTaxSettings({
+								longTermTaxRate: numberInputValue(
+									event.currentTarget.valueAsNumber,
+									defaultDashboardSettings.longTermTaxRate,
+								),
+							})}
+					/>
+					<span>%</span>
+				</label>
+			</div>
+
+			<div class="filter">
+				<button class="filter-button" type="button" onclick={() => (menuOpen = !menuOpen)}>
+					<span>{selectedLabel}</span>
+					<span aria-hidden="true">v</span>
+				</button>
+				{#if menuOpen && dashboard}
+					<div class="filter-menu">
+						<div class="filter-actions">
+							<button type="button" onclick={() => setSymbols(dashboard?.symbols ?? [])}>All</button>
+							<button type="button" onclick={() => setSymbols([])}>None</button>
+						</div>
+						{#each dashboard.symbols as symbol}
+							<label>
+								<input
+									type="checkbox"
+									checked={selectedSymbols.includes(symbol)}
+									onchange={event => toggleSymbol(symbol, event.currentTarget.checked)}
+								/>
+								<span>{symbol}</span>
+							</label>
+						{/each}
 					</div>
-					{#each dashboard.symbols as symbol}
-						<label>
-							<input
-								type="checkbox"
-								checked={selectedSymbols.includes(symbol)}
-								onchange={event => toggleSymbol(symbol, event.currentTarget.checked)}
-							/>
-							<span>{symbol}</span>
-						</label>
-					{/each}
-				</div>
-			{/if}
+				{/if}
+			</div>
 		</div>
 	</header>
 
@@ -400,19 +497,28 @@
 								</td>
 								<td class="number">{formatNumber(trade.quantity)}</td>
 								<td class="number">{formatMoney(trade.soldPrice)}</td>
-								<td class={metricClass(trade.actualReturnPct)}>
+								<td class={metricClass(trade.actualReturnPct)} title={shortTermTitle(trade.shortTermGain)}>
 									{formatOutcome(trade.actualPnl, trade.actualReturnPct)}
+									{#if trade.shortTermGain}
+										<span class="short-term-marker" title="short term gains">💥</span>
+									{/if}
 								</td>
 								{#each dashboard.horizons as horizon}
 									{@const metric = trade.later[horizon.key]}
-									<td class={metricClass(metric?.returnPct)} title={metric ? formatDate(metric.targetDate) : ''}>
+									<td class={metricClass(metric?.returnPct)} title={metricTitle(metric)}>
 										{formatMetric(metric)}
+										{#if metric?.shortTermGain}
+											<span class="short-term-marker" title="short term gains">💥</span>
+										{/if}
 									</td>
 								{/each}
 								{#each dashboard.horizons as horizon}
 									{@const metric = trade.earlier[horizon.key]}
-									<td class={metricClass(metric?.returnPct)} title={metric ? formatDate(metric.targetDate) : ''}>
+									<td class={metricClass(metric?.returnPct)} title={metricTitle(metric)}>
 										{formatMetric(metric)}
+										{#if metric?.shortTermGain}
+											<span class="short-term-marker" title="short term gains">💥</span>
+										{/if}
 									</td>
 								{/each}
 							</tr>
@@ -469,6 +575,57 @@
 
 	button {
 		cursor: pointer;
+	}
+
+	input {
+		font: inherit;
+	}
+
+	.header-controls {
+		display: flex;
+		align-items: flex-start;
+		gap: 12px;
+	}
+
+	.tax-controls {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		border: 1px solid var(--app-border);
+		border-radius: 8px;
+		background: var(--app-panel);
+		padding: 8px 10px;
+	}
+
+	.tax-controls label {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+		color: var(--app-text);
+		font-size: 0.86rem;
+		font-weight: 700;
+		white-space: nowrap;
+	}
+
+	.tax-toggle input {
+		width: 16px;
+		height: 16px;
+		margin: 0;
+	}
+
+	.tax-rate input {
+		width: 64px;
+		border: 1px solid var(--app-border);
+		border-radius: 6px;
+		background: var(--app-bg);
+		color: var(--app-text);
+		padding: 5px 7px;
+		text-align: right;
+	}
+
+	.tax-rate input:disabled {
+		color: var(--app-muted);
+		opacity: 0.65;
 	}
 
 	.filter {
@@ -751,6 +908,15 @@
 		color: var(--app-text);
 	}
 
+	.short-term-marker {
+		display: inline-block;
+		max-width: none;
+		margin-left: 5px;
+		overflow: visible;
+		color: inherit;
+		vertical-align: middle;
+	}
+
 	.notice {
 		padding: 22px;
 		color: var(--app-muted);
@@ -771,6 +937,17 @@
 
 		.topbar {
 			flex-direction: column;
+		}
+
+		.header-controls {
+			width: 100%;
+			flex-direction: column;
+		}
+
+		.tax-controls {
+			width: 100%;
+			flex-wrap: wrap;
+			align-items: flex-start;
 		}
 
 		.filter,

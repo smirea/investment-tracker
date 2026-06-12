@@ -17,6 +17,11 @@ const horizons = [
 	{ key: '6m', label: '6 months', months: 6 },
 	{ key: '12m', label: '12 months', months: 12 },
 ] as const;
+const defaultTaxSettings = {
+	enabled: true,
+	shortTermRate: 0.408,
+	longTermRate: 0.238,
+};
 
 type SchwabRow = {
 	Date: string;
@@ -84,9 +89,14 @@ export type ComparisonMetric = {
 	returnPct: number;
 	deltaPnl: number;
 	deltaReturnPct: number;
+	taxAmount: number;
+	shortTermGain: boolean;
 };
 
 export type TradeRow = MatchedTrade & {
+	grossActualPnl?: number;
+	taxAmount?: number;
+	shortTermGain: boolean;
 	marketPnl?: number;
 	marketReturnPct?: number;
 	later: Record<string, ComparisonMetric | null>;
@@ -123,6 +133,7 @@ export type DashboardResponse = {
 	symbols: string[];
 	selectedSymbols: string[];
 	marketSymbol: string;
+	taxes: TaxSettings;
 	cache: CacheStatus[];
 	summary: DashboardSummary;
 	chart: ChartPoint[];
@@ -130,7 +141,14 @@ export type DashboardResponse = {
 	horizons: typeof horizons;
 };
 
+export type TaxSettings = {
+	enabled: boolean;
+	shortTermRate: number;
+	longTermRate: number;
+};
+
 export async function buildDashboard(url: URL): Promise<DashboardResponse> {
+	const taxes = getTaxSettings(url);
 	const { files, transactions } = readStockTransactions();
 	const matchedTrades = matchTrades(transactions);
 	const symbols = [...new Set(matchedTrades.map(trade => trade.symbol))].sort();
@@ -139,7 +157,7 @@ export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 	const requiredSymbols = selectedSymbols.length > 0 ? [...selectedSymbols, marketSymbol] : [marketSymbol];
 	const cache = await ensurePriceHistory(requiredSymbols);
 	const history = getPriceHistory(requiredSymbols);
-	const trades = enrichTrades(selectedTrades, history);
+	const trades = enrichTrades(selectedTrades, history, taxes);
 
 	return {
 		ok: true,
@@ -148,6 +166,7 @@ export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 		symbols,
 		selectedSymbols,
 		marketSymbol,
+		taxes,
 		cache,
 		summary: summarize(trades),
 		chart: buildChart(trades),
@@ -282,20 +301,32 @@ function matchTrades(transactions: StockTransaction[]) {
 	return trades;
 }
 
-function enrichTrades(trades: MatchedTrade[], history: PriceHistory) {
+function enrichTrades(trades: MatchedTrade[], history: PriceHistory, taxes: TaxSettings) {
 	return trades.map(trade => {
 		const symbolHistory = history[trade.symbol] ?? [];
 		const marketHistory = history[marketSymbol] ?? [];
+		const actual = compareActual(trade, taxes);
 		const later = Object.fromEntries(
-			horizons.map(horizon => [horizon.key, compareHypothetical(trade, symbolHistory, horizon.months, 1)]),
+			horizons.map(horizon => [
+				horizon.key,
+				compareHypothetical(trade, symbolHistory, horizon.months, 1, actual, taxes),
+			]),
 		);
 		const earlier = Object.fromEntries(
-			horizons.map(horizon => [horizon.key, compareHypothetical(trade, symbolHistory, horizon.months, -1)]),
+			horizons.map(horizon => [
+				horizon.key,
+				compareHypothetical(trade, symbolHistory, horizon.months, -1, actual, taxes),
+			]),
 		);
-		const market = compareMarket(trade, marketHistory);
+		const market = compareMarket(trade, marketHistory, taxes);
 
 		return {
 			...trade,
+			grossActualPnl: trade.actualPnl,
+			actualPnl: actual?.pnl,
+			actualReturnPct: actual?.returnPct,
+			taxAmount: actual?.taxAmount,
+			shortTermGain: actual?.shortTermGain ?? false,
 			marketPnl: market?.pnl,
 			marketReturnPct: market?.returnPct,
 			later,
@@ -309,13 +340,10 @@ function compareHypothetical(
 	history: PricePoint[],
 	months: number,
 	direction: 1 | -1,
+	actual: ProfitMetric | undefined,
+	taxes: TaxSettings,
 ): ComparisonMetric | null {
-	if (
-		!trade.costBasis ||
-		trade.actualPnl === undefined ||
-		trade.actualReturnPct === undefined ||
-		trade.matchedQuantity <= 0
-	) {
+	if (!trade.costBasis || !actual || trade.matchedQuantity <= 0) {
 		return null;
 	}
 
@@ -325,35 +353,60 @@ function compareHypothetical(
 	const point = direction === 1 ? priceOnOrAfter(history, targetDate) : priceOnOrBefore(history, targetDate);
 	if (!point) return null;
 
-	const pnl = point.adjustedClose * trade.matchedQuantity - trade.costBasis;
-	const returnPct = pnl / trade.costBasis;
+	const metric = taxAdjustedMetric(
+		trade.matches.map(match => ({
+			buyDate: match.buyDate,
+			sellDate: point.date,
+			costBasis: match.costBasis,
+			proceeds: point.adjustedClose * match.quantity,
+		})),
+		taxes,
+	);
 	return {
 		targetDate: point.date,
 		price: point.adjustedClose,
-		pnl,
-		returnPct,
-		deltaPnl: pnl - trade.actualPnl,
-		deltaReturnPct: returnPct - trade.actualReturnPct,
+		pnl: metric.pnl,
+		returnPct: metric.returnPct,
+		deltaPnl: metric.pnl - actual.pnl,
+		deltaReturnPct: metric.returnPct - actual.returnPct,
+		taxAmount: metric.taxAmount,
+		shortTermGain: metric.shortTermGain,
 	};
 }
 
-function compareMarket(trade: MatchedTrade, marketHistory: PricePoint[]) {
+function compareActual(trade: MatchedTrade, taxes: TaxSettings) {
+	if (!trade.costBasis || trade.matchedProceeds === undefined || trade.matches.length === 0) return;
+
+	const matchedProceeds = trade.matchedProceeds;
+	return taxAdjustedMetric(
+		trade.matches.map(match => ({
+			buyDate: match.buyDate,
+			sellDate: trade.date,
+			costBasis: match.costBasis,
+			proceeds: matchedProceeds * (match.quantity / trade.matchedQuantity),
+		})),
+		taxes,
+	);
+}
+
+function compareMarket(trade: MatchedTrade, marketHistory: PricePoint[], taxes: TaxSettings) {
 	if (!trade.costBasis || trade.matches.length === 0) return;
 
-	let basis = 0;
-	let marketValue = 0;
+	const lines: ProfitLine[] = [];
 	for (const match of trade.matches) {
 		const buyPoint = priceOnOrBefore(marketHistory, match.buyDate);
 		const sellPoint = priceOnOrBefore(marketHistory, trade.date);
 		if (!buyPoint || !sellPoint) continue;
 
-		basis += match.costBasis;
-		marketValue += match.costBasis * (sellPoint.adjustedClose / buyPoint.adjustedClose);
+		lines.push({
+			buyDate: match.buyDate,
+			sellDate: trade.date,
+			costBasis: match.costBasis,
+			proceeds: match.costBasis * (sellPoint.adjustedClose / buyPoint.adjustedClose),
+		});
 	}
 
-	if (basis === 0) return;
-	const pnl = marketValue - basis;
-	return { pnl, returnPct: pnl / basis };
+	return lines.length > 0 ? taxAdjustedMetric(lines, taxes) : undefined;
 }
 
 function summarize(trades: TradeRow[]): DashboardSummary {
@@ -452,6 +505,67 @@ function getSelectedSymbols(url: URL, symbols: string[]) {
 	);
 
 	return symbols.filter(symbol => requested.has(symbol));
+}
+
+type ProfitLine = {
+	buyDate: string;
+	sellDate: string;
+	costBasis: number;
+	proceeds: number;
+};
+
+type ProfitMetric = {
+	pnl: number;
+	returnPct: number;
+	taxAmount: number;
+	shortTermGain: boolean;
+};
+
+function taxAdjustedMetric(lines: ProfitLine[], taxes: TaxSettings): ProfitMetric {
+	const costBasis = sum(lines.map(line => line.costBasis));
+	let pnl = 0;
+	let taxAmount = 0;
+	let shortTermGain = false;
+
+	for (const line of lines) {
+		const grossPnl = line.proceeds - line.costBasis;
+		const isShortTerm = isShortTermHolding(line.buyDate, line.sellDate);
+		const tax = taxes.enabled && grossPnl > 0 ? grossPnl * (isShortTerm ? taxes.shortTermRate : taxes.longTermRate) : 0;
+		pnl += grossPnl - tax;
+		taxAmount += tax;
+		shortTermGain ||= taxes.enabled && grossPnl > 0 && isShortTerm;
+	}
+
+	return {
+		pnl,
+		returnPct: costBasis > 0 ? pnl / costBasis : 0,
+		taxAmount,
+		shortTermGain,
+	};
+}
+
+function getTaxSettings(url: URL): TaxSettings {
+	return {
+		enabled: parseBoolean(url.searchParams.get('taxes'), defaultTaxSettings.enabled),
+		shortTermRate: parseRate(url.searchParams.get('shortTermTaxRate'), defaultTaxSettings.shortTermRate),
+		longTermRate: parseRate(url.searchParams.get('longTermTaxRate'), defaultTaxSettings.longTermRate),
+	};
+}
+
+function parseBoolean(value: string | null, fallback: boolean) {
+	if (value === null) return fallback;
+	return value !== '0' && value !== 'false';
+}
+
+function parseRate(value: string | null, fallback: number) {
+	if (value === null) return fallback;
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed)) return fallback;
+	return Math.min(1, Math.max(0, parsed));
+}
+
+function isShortTermHolding(buyDate: string, sellDate: string) {
+	return sellDate <= addMonths(buyDate, 12);
 }
 
 function weightedHoldingDays(matches: Match[], sellDate: string, costBasis: number) {
