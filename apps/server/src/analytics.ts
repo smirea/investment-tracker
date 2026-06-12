@@ -75,6 +75,28 @@ type OptionTransaction = {
 	strike: number;
 };
 
+export type CsvTransactionRow = {
+	id: string;
+	file: string;
+	line: number;
+	date?: string;
+	rawDate: string;
+	action: string;
+	symbol: string;
+	description: string;
+	quantity?: number;
+	price?: number;
+	fees?: number;
+	amount?: number;
+	assetType: 'stock' | 'option' | 'cash' | 'transfer' | 'other';
+	underlyingSymbol?: string;
+	optionKind?: OptionKind;
+	expirationDate?: string;
+	strike?: number;
+	filterSymbol?: string;
+	analysis?: TradeRow;
+};
+
 type Lot = {
 	buyId: string;
 	date: string;
@@ -213,6 +235,7 @@ export type DashboardResponse = {
 	totalSummary: TotalSummary;
 	chart: ChartPoint[];
 	trades: TradeRow[];
+	transactions: CsvTransactionRow[];
 	horizons: typeof horizons;
 };
 
@@ -244,7 +267,7 @@ export type TaxSettings = {
 
 export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 	const taxes = getTaxSettings(url);
-	const { files, stockTransactions, optionTransactions } = readTransactions();
+	const { files, transactions, stockTransactions, optionTransactions } = readTransactions();
 	const matchedStockTrades = matchTrades(stockTransactions);
 	const matchedOptionTrades = matchOptions(optionTransactions);
 	const stockSymbols = [...new Set(matchedStockTrades.map(trade => trade.symbol))].sort();
@@ -261,6 +284,7 @@ export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 	const stockTrades = enrichTrades(selectedStockTrades, history, taxes);
 	const optionTrades = enrichTrades(selectedOptionTrades, history, taxes);
 	const trades = [...stockTrades, ...optionTrades];
+	const selectedTransactions = filterCsvTransactions(transactions, selectedSymbols, symbols);
 
 	return {
 		ok: true,
@@ -276,6 +300,7 @@ export async function buildDashboard(url: URL): Promise<DashboardResponse> {
 		totalSummary: summarizeTotal(stockTrades, optionTrades),
 		chart: buildChart(stockTrades),
 		trades: trades.sort((a, b) => b.date.localeCompare(a.date) || a.symbol.localeCompare(b.symbol)),
+		transactions: attachAnalysis(selectedTransactions, trades),
 		horizons,
 	};
 }
@@ -328,6 +353,7 @@ function readTransactions() {
 	const files = readdirSync(dataDir)
 		.filter(file => file.toLowerCase().endsWith('.csv'))
 		.sort();
+	const transactions: CsvTransactionRow[] = [];
 	const stockTransactions: StockTransaction[] = [];
 	const optionTransactions: OptionTransaction[] = [];
 
@@ -340,6 +366,8 @@ function readTransactions() {
 		}) as SchwabRow[];
 
 		rows.forEach((row, index) => {
+			transactions.push(toCsvTransaction(row, file, index + 2));
+
 			const stockTransaction = toStockTransaction(row, file, index + 2);
 			if (stockTransaction) stockTransactions.push(stockTransaction);
 
@@ -348,7 +376,50 @@ function readTransactions() {
 		});
 	}
 
-	return { files, stockTransactions, optionTransactions };
+	return { files, transactions, stockTransactions, optionTransactions };
+}
+
+function toCsvTransaction(row: SchwabRow, file: string, line: number): CsvTransactionRow {
+	const symbol = row.Symbol.trim().toUpperCase();
+	const parsedOption = parseOptionSymbol(row.Symbol.trim());
+	const assetType = csvAssetType(row, parsedOption !== undefined);
+	const filterSymbol = parsedOption?.underlyingSymbol ?? (assetType === 'stock' && symbol ? symbol : undefined);
+
+	return {
+		id: `${file}:${line}`,
+		file,
+		line,
+		date: parseEffectiveDate(row.Date) ?? parseDate(row.Date),
+		rawDate: row.Date.trim(),
+		action: row.Action.trim(),
+		symbol,
+		description: row.Description.trim(),
+		quantity: optionalNumberFrom(row.Quantity),
+		price: optionalMoneyFrom(row.Price),
+		fees: optionalMoneyFrom(row['Fees & Comm']),
+		amount: optionalMoneyFrom(row.Amount),
+		assetType,
+		underlyingSymbol: parsedOption?.underlyingSymbol,
+		optionKind: parsedOption?.optionKind,
+		expirationDate: parsedOption?.expirationDate,
+		strike: parsedOption?.strike,
+		filterSymbol,
+	};
+}
+
+function csvAssetType(row: SchwabRow, isOption: boolean): CsvTransactionRow['assetType'] {
+	if (isOption) return 'option';
+
+	const action = row.Action.trim();
+	const symbol = row.Symbol.trim();
+	const description = row.Description.trim();
+	if (/transfer/i.test(action) || /^Tfr /i.test(description)) return 'transfer';
+	if (!symbol) return 'cash';
+	if (/interest|dividend/i.test(action)) return 'cash';
+	if (/MONEY INVESTOR|TREASURY MONEY|VALUE ADVANTAGE/i.test(description)) return 'cash';
+	if (/CD FDIC|T BILL|TREASURY BILL/i.test(description)) return 'other';
+	if (/^[A-Z][A-Z.]{0,8}$/.test(symbol.toUpperCase())) return 'stock';
+	return 'other';
 }
 
 function toStockTransaction(row: SchwabRow, file: string, line: number): StockTransaction | undefined {
@@ -867,6 +938,16 @@ function getSelectedSymbols(url: URL, symbols: string[]) {
 	return symbols.filter(symbol => requested.has(symbol));
 }
 
+function filterCsvTransactions(rows: CsvTransactionRow[], selectedSymbols: string[], symbols: string[]) {
+	if (selectedSymbols.length === symbols.length) return rows;
+	return rows.filter(row => row.filterSymbol && selectedSymbols.includes(row.filterSymbol));
+}
+
+function attachAnalysis(rows: CsvTransactionRow[], trades: TradeRow[]) {
+	const tradeById = new Map(trades.map(trade => [trade.id, trade]));
+	return rows.map(row => ({ ...row, analysis: tradeById.get(row.id) }));
+}
+
 function requiredSymbolsFor(selectedSymbols: string[], stockSymbols: string[]) {
 	const selectedStockSymbols = selectedSymbols.filter(symbol => stockSymbols.includes(symbol));
 	return selectedStockSymbols.length > 0 ? [...selectedStockSymbols, marketSymbol] : [marketSymbol];
@@ -1065,9 +1146,21 @@ function moneyFrom(value: string) {
 	return Number.isFinite(parsed) ? parsed : Number.NaN;
 }
 
+function optionalMoneyFrom(value: string) {
+	if (!value.trim()) return;
+	const parsed = moneyFrom(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function numberFrom(value: string) {
 	const parsed = Number(value.replace(/,/g, '').trim());
 	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function optionalNumberFrom(value: string) {
+	if (!value.trim()) return;
+	const parsed = numberFrom(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function sum(values: number[]) {

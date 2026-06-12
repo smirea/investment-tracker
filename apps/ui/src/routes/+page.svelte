@@ -44,6 +44,27 @@
 		later: Record<string, ComparisonMetric | null>;
 		earlier: Record<string, ComparisonMetric | null>;
 	};
+	type TransactionRow = {
+		id: string;
+		file: string;
+		line: number;
+		date?: string;
+		rawDate: string;
+		action: string;
+		symbol: string;
+		description: string;
+		quantity?: number;
+		price?: number;
+		fees?: number;
+		amount?: number;
+		assetType: 'stock' | 'option' | 'cash' | 'transfer' | 'other';
+		underlyingSymbol?: string;
+		optionKind?: 'call' | 'put';
+		expirationDate?: string;
+		strike?: number;
+		filterSymbol?: string;
+		analysis?: TradeRow;
+	};
 	type DashboardSummary = {
 		tradeCount: number;
 		analyzedTradeCount: number;
@@ -144,6 +165,7 @@
 		totalSummary: TotalSummary;
 		chart: ChartPoint[];
 		trades: TradeRow[];
+		transactions: TransactionRow[];
 		horizons: Horizon[];
 	};
 	type DashboardSettings = {
@@ -419,24 +441,33 @@
 		return `${formatMoney(pnl)} ${formatPercent(returnPct)}`;
 	}
 
-	function optionMeta(trade: TradeRow) {
-		if (trade.assetType !== 'option') return trade.description;
+	function transactionMeta(transaction: TransactionRow) {
+		if (transaction.assetType !== 'option') return '';
 
 		const parts = [
-			trade.optionSide ? `${capitalize(trade.optionSide)} option` : 'Option',
-			trade.optionKind ? trade.optionKind.toUpperCase() : undefined,
-			trade.strike !== undefined ? formatMoney(trade.strike) : undefined,
-			trade.expirationDate ? `exp ${formatDate(trade.expirationDate)}` : undefined,
+			transaction.optionKind ? transaction.optionKind.toUpperCase() : undefined,
+			transaction.strike !== undefined ? formatMoney(transaction.strike) : undefined,
+			transaction.expirationDate ? `exp ${formatDate(transaction.expirationDate)}` : undefined,
 		].filter(Boolean);
 		return parts.join(' · ');
 	}
 
-	function tradeLabel(trade: TradeRow) {
-		return trade.assetType === 'option' && trade.underlyingSymbol ? trade.underlyingSymbol : trade.symbol;
+	function transactionLabel(transaction: TransactionRow) {
+		if (transaction.assetType === 'option' && transaction.underlyingSymbol) return transaction.underlyingSymbol;
+		return transaction.symbol || '—';
 	}
 
-	function tradeSubLabel(trade: TradeRow) {
-		return trade.assetType === 'option' ? trade.symbol : trade.description;
+	function transactionSubLabel(transaction: TransactionRow) {
+		return transaction.assetType === 'option' ? transaction.symbol : transaction.description;
+	}
+
+	function transactionBadge(transaction: TransactionRow) {
+		if (transaction.assetType === 'stock') return;
+		return capitalize(transaction.assetType);
+	}
+
+	function transactionDateDetail(transaction: TransactionRow) {
+		return transaction.rawDate.includes(' as of ') ? transaction.rawDate : `line ${transaction.line}`;
 	}
 
 	function metricTitle(metric: ComparisonMetric | null) {
@@ -475,17 +506,15 @@
 		return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value);
 	}
 
+	function formatOptionalNumber(value?: number) {
+		return value === undefined ? '—' : formatNumber(value);
+	}
+
 	function formatDate(value?: string) {
 		if (!value) return '—';
 		return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(
 			new Date(`${value}T00:00:00`),
 		);
-	}
-
-	function buyWindow(trade: TradeRow) {
-		if (!trade.earliestBuyDate) return 'Unknown';
-		if (trade.earliestBuyDate === trade.latestBuyDate) return formatDate(trade.earliestBuyDate);
-		return `${formatDate(trade.earliestBuyDate)} to ${formatDate(trade.latestBuyDate)}`;
 	}
 
 	function capitalize(value: string) {
@@ -668,7 +697,7 @@
 			<div class="panel-heading">
 				<div>
 					<h2>Performance vs S&P 500</h2>
-					<p>{dashboard.trades.length} sell trades, {dashboard.marketSymbol} benchmark</p>
+					<p>{dashboard.summary.tradeCount} stock sell trades, {dashboard.marketSymbol} benchmark</p>
 				</div>
 				<div class="legend">
 					<span><i class="actual"></i>Trades</span>
@@ -707,8 +736,8 @@
 		<section class="table-panel">
 			<div class="panel-heading">
 				<div>
-					<h2>Trade outcomes</h2>
-					<p>FIFO cost basis, transfer and cash actions excluded</p>
+					<h2>CSV transactions</h2>
+					<p>{dashboard.transactions.length} rows from the CSV; outcome columns populate for matched closes</p>
 				</div>
 			</div>
 
@@ -716,11 +745,13 @@
 				<table>
 					<thead>
 						<tr>
-							<th>Closed</th>
-							<th>Trade</th>
-							<th>Opened</th>
+							<th>Date</th>
+							<th>Action</th>
+							<th>Transaction</th>
 							<th class="number">Qty</th>
-							<th class="number">Exit price</th>
+							<th class="number">Price</th>
+							<th class="number">Fees</th>
+							<th class="number">Amount</th>
 							<th class="number">Outcome</th>
 							{#each dashboard.horizons as horizon}
 								<th class="number">+{horizon.label}</th>
@@ -731,40 +762,52 @@
 						</tr>
 					</thead>
 					<tbody>
-						{#each dashboard.trades as trade}
-							<tr class:option-row={trade.assetType === 'option'}>
-								<td>{formatDate(trade.date)}</td>
+						{#each dashboard.transactions as transaction}
+							{@const analysis = transaction.analysis}
+							<tr
+								class:cash-row={transaction.assetType === 'cash'}
+								class:option-row={transaction.assetType === 'option'}
+								class:transfer-row={transaction.assetType === 'transfer'}
+							>
+								<td>
+									{formatDate(transaction.date)}
+									<span>{transactionDateDetail(transaction)}</span>
+								</td>
+								<td>
+									{transaction.action}
+									{#if transactionBadge(transaction)}
+										<span class:neutral-badge={transaction.assetType !== 'option'} class="asset-badge">
+											{transactionBadge(transaction)}
+										</span>
+									{/if}
+								</td>
 								<td>
 									<div class="trade-symbol-line">
-										<strong>{tradeLabel(trade)}</strong>
-										{#if trade.assetType === 'option'}
+										<strong>{transactionLabel(transaction)}</strong>
+										{#if transaction.assetType === 'option'}
 											<span class="asset-badge">Option</span>
 										{/if}
 									</div>
-									<span>{tradeSubLabel(trade)}</span>
-									{#if trade.assetType === 'option'}
-										<span>{optionMeta(trade)}</span>
+									<span>{transactionSubLabel(transaction)}</span>
+									{#if transaction.assetType === 'option'}
+										<span>{transactionMeta(transaction)}</span>
 									{/if}
 								</td>
-								<td>
-									{buyWindow(trade)}
-									{#if trade.assetType === 'option'}
-										<span>{trade.action}</span>
-									{/if}
-									{#if trade.unmatchedQuantity > 0}
-										<span>{formatNumber(trade.unmatchedQuantity)} unmatched</span>
-									{/if}
-								</td>
-								<td class="number">{formatNumber(trade.quantity)}</td>
-								<td class="number">{formatMoney(trade.soldPrice)}</td>
-								<td class={metricClass(trade.actualReturnPct)} title={shortTermTitle(trade.shortTermGain)}>
-									{formatOutcome(trade.actualPnl, trade.actualReturnPct)}
-									{#if trade.shortTermGain}
+								<td class="number">{formatOptionalNumber(transaction.quantity)}</td>
+								<td class="number">{formatMoney(transaction.price)}</td>
+								<td class="number">{formatMoney(transaction.fees)}</td>
+								<td class="number">{formatMoney(transaction.amount)}</td>
+								<td
+									class={metricClass(analysis?.actualReturnPct)}
+									title={shortTermTitle(analysis?.shortTermGain ?? false)}
+								>
+									{formatOutcome(analysis?.actualPnl, analysis?.actualReturnPct)}
+									{#if analysis?.shortTermGain}
 										<span class="short-term-marker" title="short term gains">💥</span>
 									{/if}
 								</td>
 								{#each dashboard.horizons as horizon}
-									{@const metric = trade.later[horizon.key]}
+									{@const metric = analysis?.later[horizon.key] ?? null}
 									<td class={metricClass(metric?.returnPct)} title={metricTitle(metric)}>
 										{formatMetric(metric)}
 										{#if metric?.shortTermGain}
@@ -773,7 +816,7 @@
 									</td>
 								{/each}
 								{#each dashboard.horizons as horizon}
-									{@const metric = trade.earlier[horizon.key]}
+									{@const metric = analysis?.earlier[horizon.key] ?? null}
 									<td class={metricClass(metric?.returnPct)} title={metricTitle(metric)}>
 										{formatMetric(metric)}
 										{#if metric?.shortTermGain}
@@ -1210,7 +1253,7 @@
 
 	table {
 		width: 100%;
-		min-width: 1440px;
+		min-width: 1760px;
 		border-collapse: collapse;
 		font-size: 0.88rem;
 	}
@@ -1244,6 +1287,11 @@
 		background: color-mix(in srgb, var(--app-panel-strong) 42%, transparent);
 	}
 
+	.cash-row,
+	.transfer-row {
+		background: color-mix(in srgb, var(--app-bg) 34%, transparent);
+	}
+
 	.trade-symbol-line {
 		display: flex;
 		align-items: center;
@@ -1268,6 +1316,11 @@
 		text-transform: uppercase;
 	}
 
+	.asset-badge.neutral-badge {
+		border-color: var(--app-border);
+		color: var(--app-muted);
+	}
+
 	td span {
 		display: block;
 		max-width: 220px;
@@ -1279,7 +1332,6 @@
 		display: inline-flex;
 		max-width: none;
 		overflow: visible;
-		color: var(--app-accent);
 	}
 
 	.number,
